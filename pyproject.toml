@@ -1,0 +1,16 @@
+[project]
+name = "nano_banana_node"
+description = "A custom node for ComfyUI that allows you to interact with Nano Banana's Vertex API proxy, providing access to Gemini models with dynamic image inputs."
+version = "2.0.0"
+license = {file = "LICENSE"}
+dependencies = ["requests", "tiktoken", "Pillow", "python-dotenv"]
+requires-python = ">=3.8"
+
+[project.urls]
+Repository = "https://github.com/gabe-init/ComfyUI-Openrouter_node"
+#  Used by Comfy Registry https://comfyregistry.org
+
+[tool.comfy]
+PublisherId = "gabe-init"
+DisplayName = "ComfyUI-NanoBanana_node"
+Icon = ""
