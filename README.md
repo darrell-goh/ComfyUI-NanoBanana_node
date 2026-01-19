@@ -9,10 +9,10 @@ This project is an independent implementation focused solely on Nano Banana and 
 ## Features
 
 - **Dynamic Image Inputs** - Automatically adds new image input slots as you connect images (up to 10)
-- **Image Generation Support** - Generate images with Gemini/Nano Banana models through Vertex API
+- **Image Generation Support** - Generate images with Gemini models through Vertex API with customizable resolution (2K/4K) and aspect ratios
 - **Chat Mode** - Maintain conversation context across multiple messages with automatic session management
 - **Multi-Image Support** - Send multiple images in a single request to supported Gemini models
-- **Flexible Configuration** - Use environment variables for easy endpoint and model configuration
+- **Environment Configuration** - Uses `.env` file with python-dotenv for easy setup and credential management
 
 ## Installation
 
@@ -22,7 +22,7 @@ cd ComfyUI/custom_nodes
 git clone https://github.com/gabe-init/ComfyUI-Openrouter_node
 ```
 
-2. Install the required dependencies:
+2. Install dependencies using uv (recommended) or pip:
 ```bash
 pip install -r requirements.txt
 ```
@@ -65,13 +65,16 @@ The Nano Banana node provides a simple interface to interact with Gemini models 
 - **user_message_box**: The user message to send to the model
 - **model**: The Gemini model to use (configured via environment variables)
 - **image_generation**: Enable image generation for supported models
-- **temperature**: Controls the randomness of output (0.0 to 2.0)
-- **chat_mode**: Enable conversation mode to maintain context across messages
+- **temperature**: Controls the randomness of output (0.0 to 1.0)
+- **chat_mode**: Enable conversation mode to maintain context across messages (accepts string connections from other nodes)
+- **model**: The Gemini model to use (configured via environment variables)
+- **image_generation**: Enable image generation for supported models
+- **resolution**: Image output resolution - `2K` or `4K` (only for image generation)
+- **aspect_ratio**: Image aspect ratio - `1:1`, `4:3`, `3:4`, `16:9`, `9:16`, `3:2`, `2:3`, `5:4`, `4:5`, `21:9` (only for image generation)
 
 #### Optional Inputs:
 
 - **image_1** through **image_10**: Dynamic image inputs that automatically appear as you connect images
-- **user_message_input**: Alternative input for the user message, useful for connecting to other nodes
 
 ### Outputs:
 
@@ -86,9 +89,16 @@ The Nano Banana node provides a simple interface to interact with Gemini models 
 1. Set a system prompt
 2. Enter a generation prompt (e.g., "Generate a beautiful sunset over mountains")
 3. Enable the "image_generation" option
-4. Select an image-capable model (e.g., "gemini-2.5-flash-image")
-5. Run the workflow
-6. The generated image will appear in the "image" output
+4. Select resolution (`2K` or `4K`)
+5. Select aspect ratio (e.g., `16:9` for landscape, `9:16` for portrait, `1:1` for square)
+6. Select an image-capable model (e.g., "gemini-3-pro-image-preview")
+7. Run the workflow
+8. The generated image will appear in the "image" output
+
+**Note**: resolution and aspect ratio for output
+- 2K 1:1 = 2048×2048 pixels
+- 4K 16:9 = 4096×2304 pixels
+- See Nano Banana documentation for complete resolution table
 
 ### Image Edit
 
@@ -152,10 +162,17 @@ python manage_chats.py clean -d 30
 
 ### Supported Models
 
-Configure your available models in the `.env` file. Common Gemini models include:
-- `gemini-2.5-flash-image` - Fast image generation and understanding
-- `gemini-3-pro-image-preview` - Advanced image capabilities
-- Other Gemini models as supported by your Vertex AI instance
+Configure your available models in the `.env` file.
+- Common Gemini models include:
+   - `gemini-2.5-flash-image` - Fast image generation and understanding
+   - `gemini-3-pro-image-preview` - Advanced image capabilities
+   - Other Gemini models as supported by your Vertex AI instance
+- Ensure you've enabled `image_generation`
+- Use a compatible model like `gemini-3-pro-image-preview`
+- Check resolution and aspect ratio settings
+- Review console output for `[NanoBanana]` debug messages
+- **Chat mode issues**: Check that the `chats` folder has write permissions
+- **Environment variables not loading**: Ensure `.env` file is in the node directory and `python-dotenv` is installed
 
 ## Troubleshooting
 

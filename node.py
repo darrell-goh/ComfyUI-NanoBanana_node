@@ -42,31 +42,30 @@ class NanoBananaNode:
             "required": {
                 "system_prompt": ("STRING", {
                     "multiline": True,
-                    "default": "You are a helpful assistant."
+                    "default": "You are a master artist and expert at digital art."
                 }),
                 "user_message_box": ("STRING", {
                     "multiline": True,
-                    "default": "Hello, how are you?"
+                    "default": "Combine all the input images with a background of your envisioning in the year 2050."
                 }),
-                "model": (cls.fetch_nano_banana_models(),),
-                "image_generation": ("BOOLEAN", {"default": False}),
+                "model": (cls.fetch_nano_banana_models(), {"default": "gemini-3-pro-image-preview"}),
+                "image_generation": ("BOOLEAN", {"default": True}),
+                "resolution": (["2K", "4K"], {"default": "4K"}),
+                "aspect_ratio": (["1:1", "4:3", "3:4", "16:9", "9:16", "3:2", "2:3", "5:4", "4:5", "21:9"], {"default": "1:1"}),
                 "temperature": ("FLOAT", {
                     "default": 1.0,
                     "min": 0.0,
-                    "max": 2.0,
+                    "max": 1.0,
                     "step": 0.1,
                     "display": "slider",
-                    "round": 1,
+                    "round": 0.1,
                 }),
                 "chat_mode": ("BOOLEAN", {"default": False}),
-            },
-            "optional": {
-                "user_message_input": ("STRING", {"forceInput": True}),
             }
         }
 
     RETURN_TYPES = ("STRING", "IMAGE", "STRING",)
-    RETURN_NAMES = ("Output", "image", "Stats")
+    RETURN_NAMES = ("STRING (Text Output)", "IMAGE", "Stats")
 
     FUNCTION = "generate_response"
     CATEGORY = "LLM"
@@ -99,8 +98,8 @@ class NanoBananaNode:
 
 
     def generate_response(self, system_prompt, user_message_box, model,
-                         temperature, chat_mode, image_generation=False, 
-                         user_message_input=None, **kwargs):
+                         temperature, chat_mode, image_generation=False,
+                         resolution="4K", aspect_ratio="1:1", **kwargs):
         """
         Sends a completion request to the Vertex AI generateContent endpoint.
         Handles text and optional image inputs.
@@ -142,8 +141,8 @@ class NanoBananaNode:
         # Validate and convert temperature
         validated_temp = self.validate_temperature(temperature)
 
-        # Decide whether to use user_message_input or user_message_box
-        user_text = user_message_input if user_message_input is not None and user_message_input.strip() else user_message_box
+        # Use user_message_box directly
+        user_text = user_message_box
 
         # Initialize session_path
         session_path = None
@@ -254,7 +253,17 @@ class NanoBananaNode:
         # This prevents "Multi-modal output is not supported" errors on text-only models
         if image_generation:
             data["generationConfig"]["candidateCount"] = 1
-            print(f"Image generation enabled by user setting")
+            # Add aspect_ratio and resolution for Nano Banana Pro 4K Generation
+            data["generationConfig"]["image_config"] = {
+                "aspect_ratio": aspect_ratio,
+                "image_size": resolution
+            }
+            # Request image output modality
+            data["generationConfig"]["responseModalities"] = ["TEXT", "IMAGE"]
+            print(f"[NanoBanana] Image generation enabled", flush=True)
+            print(f"[NanoBanana]   Resolution: {resolution}", flush=True)
+            print(f"[NanoBanana]   Aspect Ratio: {aspect_ratio}", flush=True)
+            print(f"[NanoBanana]   URL: {url}", flush=True)
 
         # --- Pre-calculate text input tokens (rough estimate) ---
         # Note: Actual token count depends on the model and includes image data.
@@ -266,14 +275,24 @@ class NanoBananaNode:
             print(f"Warning: Token counting failed - {e}")
 
 
-        # --- Make API Call and Process Response ---
+        # --- Make API Call and Process Response (Debugging disabled) ---
         try:
+            print(f"[NanoBanana] Sending request to API...", flush=True)
+            # print(f"[NanoBanana] Request payload (first 1000 chars): {json.dumps(data, indent=2)[:1000]}...", flush=True)
             start_time = time.time()
-            response = requests.post(url, headers=headers, json=data)
-            response.raise_for_status() # Raises HTTPError for bad responses (4xx or 5xx)
+            response = requests.post(url, headers=headers, json=data, timeout=120)
             end_time = time.time()
+            print(f"[NanoBanana] Response received in {end_time - start_time:.2f}s", flush=True)
+            print(f"[NanoBanana] Response status: {response.status_code}", flush=True)
+            
+            # Log raw response for debugging
+            # response_text = response.text
+            # print(f"[NanoBanana] Raw response (first 500 chars): {response_text[:500]}", flush=True)
+            
+            response.raise_for_status() # Raises HTTPError for bad responses (4xx or 5xx)
 
             result = response.json()
+            print(f"[NanoBanana] Response keys: {list(result.keys())}", flush=True)
 
             # --- Extract results and calculate stats ---
             # Vertex AI returns "candidates" instead of "choices"
@@ -285,6 +304,10 @@ class NanoBananaNode:
             content = candidate.get("content", {})
             parts = content.get("parts", [])
             
+            # print(f"[NanoBanana] Number of parts in response: {len(parts)}", flush=True)
+            # for i, part in enumerate(parts):
+            #     print(f"[NanoBanana] Part {i} keys: {list(part.keys())}", flush=True)
+            
             text_output = ""
             image_tensor = placeholder_image
             
@@ -292,16 +315,26 @@ class NanoBananaNode:
             for part in parts:
                 if "text" in part:
                     text_output += part["text"]
+                    print(f"[NanoBanana] Found text part: {len(part['text'])} chars", flush=True)
                 elif "inlineData" in part:
                     # Handle inline image data
                     inline_data = part["inlineData"]
-                    if inline_data.get("mimeType", "").startswith("image"):
+                    mime_type = inline_data.get("mimeType", "")
+                    print(f"[NanoBanana] Found inlineData with mimeType: {mime_type}", flush=True)
+                    if mime_type.startswith("image"):
                         base64_str = inline_data.get("data", "")
+                        print(f"[NanoBanana] Image base64 length: {len(base64_str)} chars", flush=True)
                         try:
                             image_tensor = self.base64_to_image(base64_str)
-                            print(f"Successfully decoded image from API response")
+                            print(f"[NanoBanana] Successfully decoded image, shape: {image_tensor.shape}", flush=True)
                         except Exception as e:
-                            print(f"Error decoding image: {e}")
+                            print(f"[NanoBanana] Error decoding image: {e}", flush=True)
+                elif "fileData" in part:
+                    # Handle file data (alternative format)
+                    file_data = part["fileData"]
+                    print(f"[NanoBanana] Found fileData: {list(file_data.keys())}", flush=True)
+                else:
+                    print(f"[NanoBanana] Unknown part type: {list(part.keys())}", flush=True)
 
             # Vertex AI returns usage metadata differently
             usage_metadata = result.get("usageMetadata", {})
@@ -355,18 +388,24 @@ class NanoBananaNode:
 
         except requests.exceptions.RequestException as e:
             error_message = f"API Request Error: {str(e)}"
+            print(f"[NanoBanana] RequestException: {e}", flush=True)
             if hasattr(e, 'response') and e.response is not None:
+                print(f"[NanoBanana] Response status: {e.response.status_code}", flush=True)
+                print(f"[NanoBanana] Response text: {e.response.text[:500]}", flush=True)
                 try:
                     error_detail = e.response.json() # Try to get JSON error detail
                     error_message += f" | Details: {error_detail}"
                 except json.JSONDecodeError:
-                    error_message += f" | Status: {e.response.status_code} | Response: {e.response.text[:200]}" # Show raw text if not JSON
+                    error_message += f" | Status: {e.response.status_code} | Response: {e.response.text[:500]}" # Show raw text if not JSON
             else:
                  error_message += " (Network or connection issue)" # Generic network error
 
             return (error_message, placeholder_image, "Stats N/A due to error")
         except Exception as e: # Catch other potential errors (e.g., JSON parsing, value errors)
-             return (f"Node Error: {str(e)}", placeholder_image, "Stats N/A due to error")
+            import traceback
+            print(f"[NanoBanana] Exception: {e}", flush=True)
+            print(f"[NanoBanana] Traceback: {traceback.format_exc()}", flush=True)
+            return (f"Node Error: {str(e)}", placeholder_image, "Stats N/A due to error")
 
     @staticmethod
     def image_to_base64(image):
@@ -476,8 +515,7 @@ class NanoBananaNode:
 
     @classmethod
     def IS_CHANGED(cls, system_prompt, user_message_box, model,
-                   temperature, chat_mode, image_generation=False, 
-                   user_message_input=None, **kwargs):
+                   temperature, chat_mode, image_generation=False, **kwargs):
         """
         Check if any input that affects the output has changed.
         Includes hashing image data.
@@ -513,7 +551,7 @@ class NanoBananaNode:
         # Use primitive types where possible for reliable hashing/comparison
         return (system_prompt, user_message_box, model,
                 temp_float, chat_mode, image_generation, 
-                tuple(image_hashes), user_message_input)
+                tuple(image_hashes))
 
 # Node class mappings
 NODE_CLASS_MAPPINGS = {
