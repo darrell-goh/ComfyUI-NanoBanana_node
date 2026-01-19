@@ -65,12 +65,11 @@ The Nano Banana node provides a simple interface to interact with Gemini models 
 - **user_message_box**: The user message to send to the model
 - **model**: The Gemini model to use (configured via environment variables)
 - **image_generation**: Enable image generation for supported models
-- **temperature**: Controls the randomness of output (0.0 to 1.0)
-- **chat_mode**: Enable conversation mode to maintain context across messages (accepts string connections from other nodes)
-- **model**: The Gemini model to use (configured via environment variables)
-- **image_generation**: Enable image generation for supported models
 - **resolution**: Image output resolution - `2K` or `4K` (only for image generation)
 - **aspect_ratio**: Image aspect ratio - `1:1`, `4:3`, `3:4`, `16:9`, `9:16`, `3:2`, `2:3`, `5:4`, `4:5`, `21:9` (only for image generation)
+- **temperature**: Controls the randomness of output (0.0 to 1.0)
+- **timeout**: Request timeout in seconds (30-600s, default: 300s) - increase for slower responses or 4K generation
+- **chat_mode**: Enable conversation mode to maintain context across messages
 
 #### Optional Inputs:
 

@@ -60,6 +60,13 @@ class NanoBananaNode:
                     "display": "slider",
                     "round": 0.1,
                 }),
+                "timeout": ("INT", {
+                    "default": 300,
+                    "min": 30,
+                    "max": 600,
+                    "step": 10,
+                    "display": "slider"
+                }),
                 "chat_mode": ("BOOLEAN", {"default": False}),
             }
         }
@@ -98,7 +105,7 @@ class NanoBananaNode:
 
 
     def generate_response(self, system_prompt, user_message_box, model,
-                         temperature, chat_mode, image_generation=False,
+                         temperature, timeout, chat_mode, image_generation=False,
                          resolution="4K", aspect_ratio="1:1", **kwargs):
         """
         Sends a completion request to the Vertex AI generateContent endpoint.
@@ -280,7 +287,7 @@ class NanoBananaNode:
             print(f"[NanoBanana] Sending request to API...", flush=True)
             # print(f"[NanoBanana] Request payload (first 1000 chars): {json.dumps(data, indent=2)[:1000]}...", flush=True)
             start_time = time.time()
-            response = requests.post(url, headers=headers, json=data, timeout=120)
+            response = requests.post(url, headers=headers, json=data, timeout=timeout)
             end_time = time.time()
             print(f"[NanoBanana] Response received in {end_time - start_time:.2f}s", flush=True)
             print(f"[NanoBanana] Response status: {response.status_code}", flush=True)
@@ -515,7 +522,7 @@ class NanoBananaNode:
 
     @classmethod
     def IS_CHANGED(cls, system_prompt, user_message_box, model,
-                   temperature, chat_mode, image_generation=False, **kwargs):
+                   temperature, timeout, chat_mode, image_generation=False, **kwargs):
         """
         Check if any input that affects the output has changed.
         Includes hashing image data.
