@@ -1,6 +1,6 @@
 # ComfyUI Nano Banana Node
 
-A custom node for ComfyUI that provides seamless integration with Google Vertex AI REST API format, featuring dynamic image inputs and chat mode functionality.
+A custom node for ComfyUI that provides seamless integration with Google Vertex AI REST API format, featuring dynamic image inputs, chat mode functionality, and parallel image generation.
 
 This project is derived from the design and structural patterns of the [ComfyUI-Openrouter_node](https://github.com/gabe-init/ComfyUI-Openrouter_node) project by **@gabe-init**, from which elements such as dynamic image input handling and general node architecture principles were adapted. The original work is licensed under the MIT Licence, and its licence is included in this repository in accordance with its terms.
 
@@ -8,9 +8,15 @@ This project is an independent implementation focused solely on Nano Banana and 
 
 ## Features
 
-- **Dynamic Image Inputs** - Automatically adds new image input slots as you connect images (up to 10)
+- **Two Specialized Nodes**
+  - **Nano Banana (Pro) Node** - Single output with chat mode and full feature set
+  - **Nano Banana (Pro) Node Multiple Outputs** - Generate up to 5 variations in parallel
+- **Dynamic Image Inputs** - Automatically adds new image input slots as you connect images
+  - Up to 14 images for Gemini 3 Pro Image models
+  - Up to 6 images for Gemini 2.5 Flash Image models
 - **Image Generation Support** - Generate images with Gemini models through Vertex API with customizable resolution (2K/4K) and aspect ratios
-- **Chat Mode** - Maintain conversation context across multiple messages with automatic session management
+- **Parallel Generation** - Create multiple image variations simultaneously with configurable temperature control
+- **Chat Mode** - Maintain conversation context across multiple messages with automatic session management (single output node only)
 - **Multi-Image Support** - Send multiple images in a single request to supported Gemini models
 - **Environment Configuration** - Uses `.env` file with python-dotenv for easy setup and credential management
 
@@ -55,9 +61,11 @@ cp .env.template .env
 
 ## Usage
 
-The Nano Banana node provides a simple interface to interact with Gemini models through the Vertex AI proxy service.
+The Nano Banana nodes provide a simple interface to interact with Gemini models through the Vertex AI proxy service.
 
-### Inputs
+### Nano Banana (Pro) Node
+
+Standard node for single image generation with chat mode support.
 
 #### Required Inputs:
 
@@ -65,21 +73,70 @@ The Nano Banana node provides a simple interface to interact with Gemini models 
 - **user_message_box**: The user message to send to the model
 - **model**: The Gemini model to use (configured via environment variables)
 - **image_generation**: Enable image generation for supported models
-- **resolution**: Image output resolution - `2K` or `4K` (only for image generation)
-- **aspect_ratio**: Image aspect ratio - `1:1`, `4:3`, `3:4`, `16:9`, `9:16`, `3:2`, `2:3`, `5:4`, `4:5`, `21:9` (only for image generation)
+- **resolution**: Image output resolution - `2K` or `4K`
+- **aspect_ratio**: Image aspect ratio - `Auto` (API default), `1:1`, `4:3`, `3:4`, `16:9`, `9:16`, `3:2`, `2:3`, `5:4`, `4:5`, `21:9`. When set to `Auto`, the aspect ratio parameter is omitted and the API uses its default behavior.
 - **temperature**: Controls the randomness of output (0.0 to 1.0)
 - **timeout**: Request timeout in seconds (30-600s, default: 300s) - increase for slower responses or 4K generation
 - **chat_mode**: Enable conversation mode to maintain context across messages
 
 #### Optional Inputs:
 
-- **image_1** through **image_10**: Dynamic image inputs that automatically appear as you connect images
+- **image_1** through **image_N**: Dynamic image inputs that automatically appear as you connect images
+  - Maximum 14 images for Gemini 3 Pro Image models
+  - Maximum 6 images for Gemini 2.5 Flash Image models
 
-### Outputs:
+#### Outputs:
 
-- **Output**: The text response from the model
-- **image**: An image tensor if the response contains a generated image
+- **STRING (Text Output)**: The text response from the model
+- **IMAGE**: An image tensor if the response contains a generated image
 - **Stats**: Token usage statistics (TPS, prompt tokens, completion tokens, temperature, model)
+
+### Nano Banana (Pro) Node Multiple Outputs
+
+Generate multiple image variations in parallel with a single execution.
+
+#### Required Inputs:
+
+- **system_prompt**: The system prompt that sets the behavior of the LLM
+- **user_message_box**: The user message(s) to send to the model
+- **model**: The Gemini model to use
+- **num_outputs**: Number of parallel outputs to generate (1-5, default: 2)
+- **use_same_prompt**: Use the same prompt for all outputs (for variations) or separate prompts
+- **prompt_separator**: Delimiter to separate multiple prompts (default: `---`)
+- **image_generation**: Enable image generation for supported models
+- **resolution**: Image output resolution - `2K` or `4K`
+- **aspect_ratio**: Image aspect ratio - `Auto` (API default), `1:1`, `4:3`, `3:4`, `16:9`, `9:16`, `3:2`, `2:3`, `5:4`, `4:5`, `21:9`. When set to `Auto`, the aspect ratio parameter is omitted and the API uses its default behavior.
+- **temperature**: Controls randomness (0.0 to 0.95) - automatically limited to 0.95 when using same prompt for variations
+- **timeout**: Request timeout in seconds (30-600s, default: 300s)
+
+#### Optional Inputs:
+
+- **image_1** through **image_N**: Dynamic image inputs (same limits as single output node)
+
+#### Outputs:
+
+- **IMAGE_1** through **IMAGE_5**: Up to 5 parallel generated images
+- **Stats**: Combined statistics for all parallel requests
+
+#### Usage Modes:
+
+**Variation Mode** (use_same_prompt = True):
+- Enter one prompt in user_message_box
+- Set num_outputs to desired number of variations
+- Temperature automatically capped at 0.95 for diversity
+- Example: "Create a sunset scene" → generates 5 different sunset variations
+
+**Multiple Prompts Mode** (use_same_prompt = False):
+- Enter multiple prompts separated by `---` (or custom separator)
+- Each output uses a different prompt
+- Example:
+  ```
+  Create a sunset scene over the ocean with vibrant colors.
+  ---
+  Create a peaceful forest scene with morning mist.
+  ---
+  Create a futuristic cityscape at night.
+  ```
 
 ## Examples
 
@@ -89,12 +146,13 @@ The Nano Banana node provides a simple interface to interact with Gemini models 
 2. Enter a generation prompt (e.g., "Generate a beautiful sunset over mountains")
 3. Enable the "image_generation" option
 4. Select resolution (`2K` or `4K`)
-5. Select aspect ratio (e.g., `16:9` for landscape, `9:16` for portrait, `1:1` for square)
+5. Select aspect ratio (e.g., `16:9` for landscape, `9:16` for portrait, `1:1` for square, or `Auto` to let the API decide)
 6. Select an image-capable model (e.g., "gemini-3-pro-image-preview")
 7. Run the workflow
 8. The generated image will appear in the "image" output
 
-**Note**: resolution and aspect ratio for output
+**Note**: Resolution and aspect ratio for output
+- When `Auto` is selected, the API determines the aspect ratio automatically
 - 2K 1:1 = 2048×2048 pixels
 - 4K 16:9 = 4096×2304 pixels
 - See Nano Banana documentation for complete resolution table
@@ -163,22 +221,47 @@ python manage_chats.py clean -d 30
 
 Configure your available models in the `.env` file.
 - Common Gemini models include:
-   - `gemini-2.5-flash-image` - Fast image generation and understanding
-   - `gemini-3-pro-image-preview` - Advanced image capabilities
+   - `gemini-3-pro-image-preview` - Advanced image capabilities (14 input images max)
+   - `gemini-2.5-flash-image` - Fast image generation and understanding (6 input images max)
    - Other Gemini models as supported by your Vertex AI instance
-- Ensure you've enabled `image_generation`
-- Use a compatible model like `gemini-3-pro-image-preview`
-- Check resolution and aspect ratio settings
-- Review console output for `[NanoBanana]` debug messages
-- **Chat mode issues**: Check that the `chats` folder has write permissions
-- **Environment variables not loading**: Ensure `.env` file is in the node directory and `python-dotenv` is installed
-
 ## Troubleshooting
 
 - **Connection errors**: Verify your `VERTEX_AI_ENDPOINT` and `VERTEX_AI_API_KEY` in `.env`
 - **Model not available**: Check that the model is included in `VERTEX_AI_MODELS`
-- **Image generation not working**: Ensure you've enabled `image_generation` and are using a compatible model
+- **Image generation not working**: 
+  - Ensure you've enabled `image_generation`
+  - Use a compatible model like `gemini-3-pro-image-preview`
+  - Check resolution and aspect ratio settings
+  - Review console output for `[NanoBanana]` debug messages
+- **Too many input images error**: Check model limits (6 for Flash, 14 for Pro)
+- **Multiple outputs not generating variations**: 
+  - Ensure temperature is below 1.0 (automatically set to 0.95 in variation mode)
+  - Try using `use_same_prompt = True` for variations
 - **Chat mode issues**: Check that the `chats` folder has write permissions
+- **Environment variables not loading**: Ensure `.env` file is in the node directory and `python-dotenv` is installed
+
+## Version History
+
+### v1.2.0 (Current)
+- Added **Nano Banana (Pro) Node Multiple Outputs** for parallel generation
+- Support for up to 5 parallel image generations with configurable prompts
+- Temperature automatically capped at 0.95 when using same prompt for variations
+- Added `Auto` option for aspect ratio (lets API decide)
+- Model-specific image input limits (14 for Gemini 3 Pro, 6 for Gemini 2.5 Flash)
+- Dynamic output configuration using `MAX_OUTPUTS` constant
+
+### v1.1.0
+- Added resolution options (2K/4K) for image generation
+- Added aspect ratio selection (1:1, 4:3, 3:4, 16:9, 9:16, 3:2, 2:3, 5:4, 4:5, 21:9)
+- Added timeout configuration (30-600 seconds)
+
+### v1.0.0
+- Initial release
+- Dynamic image inputs (up to 10 images)
+- Chat mode with automatic session management
+- Temperature control
+- Environment-based configuration with `.env` file
+- Integration with Google Vertex AI REST API
 
 ## License
 

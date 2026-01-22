@@ -51,7 +51,7 @@ class NanoBananaNode:
                 "model": (cls.fetch_nano_banana_models(), {"default": "gemini-3-pro-image-preview"}),
                 "image_generation": ("BOOLEAN", {"default": True}),
                 "resolution": (["2K", "4K"], {"default": "4K"}),
-                "aspect_ratio": (["1:1", "4:3", "3:4", "16:9", "9:16", "3:2", "2:3", "5:4", "4:5", "21:9"], {"default": "1:1"}),
+                "aspect_ratio": (["Auto", "1:1", "4:3", "3:4", "16:9", "9:16", "3:2", "2:3", "5:4", "4:5", "21:9"], {"default": "Auto"}),
                 "temperature": ("FLOAT", {
                     "default": 1.0,
                     "min": 0.0,
@@ -179,9 +179,24 @@ class NanoBananaNode:
         })
 
         # 2. Add Image parts (optional) - support multiple images from kwargs
-        # Process all image_N inputs from kwargs
+        # Process all image_N inputs from kwargs with model-specific limits
         image_keys = sorted([k for k in kwargs.keys() if k.startswith('image_')], 
                            key=lambda x: int(x.split('_')[1]))
+        
+        # Model-specific image limits
+        if "gemini-2.5-flash-image" in model.lower() or "gemini-2-5-flash-image" in model.lower():
+            max_images = 6
+            model_name = "Gemini 2.5 Flash Image"
+        elif "gemini-3-pro-image" in model.lower() or "gemini-3" in model.lower():
+            max_images = 14
+            model_name = "Gemini 3 Pro Image"
+        else:
+            # Default limit for unknown models
+            max_images = 14
+            model_name = "this model"
+        
+        if len(image_keys) > max_images:
+            return (f"Error: Maximum of {max_images} input images allowed for {model_name}.", placeholder_image, "Stats N/A")
         
         for image_key in image_keys:
             if kwargs[image_key] is not None:
@@ -260,16 +275,19 @@ class NanoBananaNode:
         # This prevents "Multi-modal output is not supported" errors on text-only models
         if image_generation:
             data["generationConfig"]["candidateCount"] = 1
-            # Add aspect_ratio and resolution for Nano Banana Pro 4K Generation
-            data["generationConfig"]["image_config"] = {
-                "aspect_ratio": aspect_ratio,
+            # Add resolution and optionally aspect_ratio for Nano Banana Pro 4K Generation
+            image_config = {
                 "image_size": resolution
             }
+            # Only include aspect_ratio if not set to "Auto"
+            if aspect_ratio != "Auto":
+                image_config["aspect_ratio"] = aspect_ratio
+            data["generationConfig"]["image_config"] = image_config
             # Request image output modality
             data["generationConfig"]["responseModalities"] = ["TEXT", "IMAGE"]
             print(f"[NanoBanana] Image generation enabled", flush=True)
             print(f"[NanoBanana]   Resolution: {resolution}", flush=True)
-            print(f"[NanoBanana]   Aspect Ratio: {aspect_ratio}", flush=True)
+            print(f"[NanoBanana]   Aspect Ratio: {aspect_ratio if aspect_ratio != 'Auto' else 'Auto (API default)'}", flush=True)
             print(f"[NanoBanana]   URL: {url}", flush=True)
 
         # --- Pre-calculate text input tokens (rough estimate) ---
@@ -569,3 +587,379 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "NanoBananaNode": "Nano Banana (Pro) Node"
 }
+
+
+class NanoBananaMultipleOutputsNode:
+    """
+    A node for generating multiple parallel outputs from Vertex AI's generateContent API.
+    Supports text and images as input, with multiple image outputs.
+    Allows either using the same prompt for all outputs (for variation) or separate prompts.
+    """
+
+    MAX_OUTPUTS = 5  # Maximum number of parallel outputs
+    models_cache = None
+    last_fetch_time = 0
+    cache_duration = 3600  # Cache duration in seconds (1 hour)
+
+    def __init__(self):
+        self.chat_manager = ChatSessionManager()
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        """
+        Defines the input specification for this node with multiple outputs support.
+        """
+        return {
+            "required": {
+                "system_prompt": ("STRING", {
+                    "multiline": True,
+                    "default": "You are a master artist and expert at digital art."
+                }),
+                "user_message_box": ("STRING", {
+                    "multiline": True,
+                    "default": "Create a sunset scene over the ocean with vibrant colors.\n---\nCreate a peaceful forest scene with morning mist."
+                }),
+                "model": (cls.fetch_nano_banana_models(), {"default": "gemini-3-pro-image-preview"}),
+                "num_outputs": ("INT", {
+                    "default": 2,
+                    "min": 1,
+                    "max": cls.MAX_OUTPUTS,
+                    "step": 1,
+                    "display": "slider"
+                }),
+                "use_same_prompt": ("BOOLEAN", {"default": True}),
+                "prompt_separator": ("STRING", {
+                    "default": "---",
+                    "multiline": False
+                }),
+                "image_generation": ("BOOLEAN", {"default": True}),
+                "resolution": (["2K", "4K"], {"default": "4K"}),
+                "aspect_ratio": (["Auto", "1:1", "4:3", "3:4", "16:9", "9:16", "3:2", "2:3", "5:4", "4:5", "21:9"], {"default": "Auto"}),
+                "temperature": ("FLOAT", {
+                    "default": 0.9,
+                    "min": 0.0,
+                    "max": 0.95,
+                    "step": 0.05,
+                    "display": "slider",
+                    "round": 0.05,
+                }),
+                "timeout": ("INT", {
+                    "default": 300,
+                    "min": 30,
+                    "max": 600,
+                    "step": 10,
+                    "display": "slider"
+                }),
+            }
+        }
+
+    RETURN_TYPES = tuple(["IMAGE"] * MAX_OUTPUTS + ["STRING"])
+    RETURN_NAMES = tuple([f"IMAGE_{i+1}" for i in range(MAX_OUTPUTS)] + ["Stats"])
+
+    FUNCTION = "generate_multiple_responses"
+    CATEGORY = "LLM"
+
+    @classmethod
+    def fetch_nano_banana_models(cls):
+        """
+        Fetches a list of Gemini model IDs for Vertex AI, caching them.
+        """
+        current_time = time.time()
+        if (cls.models_cache is None) or (current_time - cls.last_fetch_time > cls.cache_duration):
+            models_env = os.getenv("VERTEX_AI_MODELS", "gemini-3-pro-image-preview,gemini-2.5-flash-image")
+            model_list = [m.strip() for m in models_env.split(",") if m.strip()]
+            cls.models_cache = sorted(model_list)
+            cls.last_fetch_time = current_time
+        return cls.models_cache if cls.models_cache else ["gemini-3-pro-image-preview"]
+
+    def validate_temperature(self, temperature, use_same_prompt):
+        """
+        Validates and converts temperature value to float within acceptable range.
+        Enforces temperature < 1.0 when using same prompt for variation.
+        """
+        try:
+            temp = float(temperature)
+            temp = max(0.0, min(2.0, temp))
+            
+            # When using same prompt for multiple outputs, enforce temperature < 1.0
+            if use_same_prompt and temp >= 1.0:
+                print(f"[NanoBanana Multi] Temperature adjusted from {temp} to 0.95 for variation generation")
+                temp = 0.95
+                
+            return temp
+        except (ValueError, TypeError):
+            return 0.9 if use_same_prompt else 1.0
+
+    def generate_multiple_responses(self, system_prompt, user_message_box, model,
+                                   num_outputs, use_same_prompt, prompt_separator,
+                                   temperature, timeout, image_generation=False,
+                                   resolution="4K", aspect_ratio="1:1", **kwargs):
+        """
+        Generates multiple parallel outputs by making separate API calls.
+        Returns 10 image outputs (populated based on num_outputs) and stats.
+        """
+        # Create empty placeholder image
+        placeholder_image = torch.zeros((1, 1, 1, 3), dtype=torch.float32)
+        
+        # Initialize all outputs with placeholder
+        output_images = [placeholder_image] * self.MAX_OUTPUTS
+        
+        # Get API key from environment variable
+        api_key = os.getenv("VERTEX_AI_API_KEY", "")
+        if not api_key:
+            return (*output_images, "Error: VERTEX_AI_API_KEY not found in environment variables.")
+
+        # Validate and convert temperature
+        validated_temp = self.validate_temperature(temperature, use_same_prompt)
+
+        # Parse prompts based on use_same_prompt setting
+        prompts = []
+        if use_same_prompt:
+            # Use the same prompt for all outputs
+            prompts = [user_message_box] * num_outputs
+        else:
+            # Split by separator
+            split_prompts = user_message_box.split(prompt_separator)
+            prompts = [p.strip() for p in split_prompts if p.strip()]
+            
+            # If not enough prompts provided, fill remaining with last prompt
+            if len(prompts) < num_outputs:
+                last_prompt = prompts[-1] if prompts else "Create a unique artistic interpretation."
+                prompts.extend([last_prompt] * (num_outputs - len(prompts)))
+            
+            # If too many prompts, truncate
+            prompts = prompts[:num_outputs]
+
+        # Prepare image data from kwargs (same for all requests)
+        image_data = []
+        image_keys = sorted([k for k in kwargs.keys() if k.startswith('image_')], 
+                           key=lambda x: int(x.split('_')[1]))
+        
+        # Model-specific image limits
+        if "gemini-2.5-flash-image" in model.lower() or "gemini-2-5-flash-image" in model.lower():
+            max_images = 6
+            model_name = "Gemini 2.5 Flash Image"
+        elif "gemini-3-pro-image" in model.lower() or "gemini-3" in model.lower():
+            max_images = 14
+            model_name = "Gemini 3 Pro Image"
+        else:
+            max_images = 14
+            model_name = "this model"
+        
+        if len(image_keys) > max_images:
+            return (*output_images, f"Error: Maximum of {max_images} input images allowed for {model_name}.")
+        
+        for image_key in image_keys:
+            if kwargs[image_key] is not None:
+                try:
+                    img_str = NanoBananaNode.image_to_base64(kwargs[image_key])
+                    image_data.append({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/png;base64,{img_str}"
+                        }
+                    })
+                except Exception as e:
+                    return (*output_images, f"Error processing {image_key}: {e}")
+
+        # Generate multiple outputs in parallel (using threading for async API calls)
+        import concurrent.futures
+        
+        def make_single_request(prompt_text, index):
+            """Helper function to make a single API request"""
+            try:
+                return self._single_generate_request(
+                    system_prompt, prompt_text, model, validated_temp,
+                    timeout, image_generation, resolution, aspect_ratio,
+                    image_data, api_key, index
+                )
+            except Exception as e:
+                print(f"[NanoBanana Multi] Error in request {index + 1}: {e}")
+                return (placeholder_image, f"Error in output {index + 1}: {str(e)}")
+
+        # Execute requests in parallel
+        all_stats = []
+        print(f"[NanoBanana Multi] Starting {num_outputs} parallel requests...")
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(num_outputs, self.MAX_OUTPUTS)) as executor:
+            # Submit all requests
+            futures = [executor.submit(make_single_request, prompts[i], i) for i in range(num_outputs)]
+            
+            # Collect results as they complete
+            for i, future in enumerate(concurrent.futures.as_completed(futures)):
+                try:
+                    img_tensor, stats = future.result()
+                    # Find which index this future belongs to
+                    idx = futures.index(future)
+                    output_images[idx] = img_tensor
+                    all_stats.append(f"Output {idx + 1}: {stats}")
+                except Exception as e:
+                    print(f"[NanoBanana Multi] Error collecting result: {e}")
+
+        # Combine all stats
+        combined_stats = " | ".join(all_stats)
+        
+        return (*output_images, combined_stats)
+
+    def _single_generate_request(self, system_prompt, user_text, model, validated_temp,
+                                 timeout, image_generation, resolution, aspect_ratio,
+                                 image_data, api_key, request_index):
+        """
+        Makes a single API request and returns the image tensor and stats.
+        """
+        placeholder_image = torch.zeros((1, 1, 1, 3), dtype=torch.float32)
+        
+        # Get endpoint configuration
+        endpoint_base = "https://aiplatform.googleapis.com/v1"
+        use_simple_endpoint = os.getenv("VERTEX_AI_USE_SIMPLE_ENDPOINT", "false").lower() == "true"
+        
+        if use_simple_endpoint:
+            if not os.getenv("VERTEX_AI_ENDPOINT"):
+                return (placeholder_image, "Error: VERTEX_AI_ENDPOINT must be set")
+            endpoint_base = os.getenv("VERTEX_AI_ENDPOINT")
+            url = f"{endpoint_base}/google/{model}:generateContent"
+        else:
+            project = os.getenv("VERTEX_AI_PROJECT", "project")
+            location = os.getenv("VERTEX_AI_LOCATION", "location")
+            url = f"{endpoint_base}/projects/{project}/locations/{location}/publishers/*/models/{model}:generateContent"
+        
+        headers = {
+            "api-key": f"{api_key}",
+            "Content-Type": "application/json",
+        }
+
+        # Build user message content
+        user_content_blocks = [{"type": "text", "text": user_text}]
+        user_content_blocks.extend(image_data)
+
+        # Build messages
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content_blocks if len(user_content_blocks) > 1 else user_text}
+        ]
+
+        # Convert to Vertex AI format
+        contents = []
+        for msg in messages:
+            if msg["role"] == "system":
+                continue
+            role = "user" if msg["role"] == "user" else "model"
+            parts = []
+            if isinstance(msg["content"], str):
+                parts.append({"text": msg["content"]})
+            elif isinstance(msg["content"], list):
+                for block in msg["content"]:
+                    if block.get("type") == "text":
+                        parts.append({"text": block.get("text", "")})
+                    elif block.get("type") == "image_url":
+                        parts.append({"inlineData": {"mimeType": "image/jpeg", "data": block["image_url"]["url"].split(",")[1]}})
+            contents.append({"role": role, "parts": parts})
+        
+        data = {
+            "contents": contents,
+            "generationConfig": {
+                "temperature": validated_temp
+            }
+        }
+        
+        # Add system instruction
+        data["systemInstruction"] = {
+            "parts": [{"text": system_prompt}]
+        }
+        
+        # Add image generation config
+        if image_generation:
+            data["generationConfig"]["candidateCount"] = 1
+            image_config = {
+                "image_size": resolution
+            }
+            # Only include aspect_ratio if not set to "Auto"
+            if aspect_ratio != "Auto":
+                image_config["aspect_ratio"] = aspect_ratio
+            data["generationConfig"]["image_config"] = image_config
+            data["generationConfig"]["responseModalities"] = ["TEXT", "IMAGE"]
+
+        # Make API call
+        try:
+            print(f"[NanoBanana Multi] Request {request_index + 1} starting...")
+            start_time = time.time()
+            response = requests.post(url, headers=headers, json=data, timeout=timeout)
+            end_time = time.time()
+            
+            response.raise_for_status()
+            result = response.json()
+
+            # Extract image from response
+            if not result.get("candidates") or not result["candidates"][0].get("content"):
+                raise ValueError("Invalid response format from API")
+
+            candidate = result["candidates"][0]
+            content = candidate.get("content", {})
+            parts = content.get("parts", [])
+            
+            image_tensor = placeholder_image
+            
+            # Extract image from parts
+            for part in parts:
+                if "inlineData" in part:
+                    inline_data = part["inlineData"]
+                    mime_type = inline_data.get("mimeType", "")
+                    if mime_type.startswith("image"):
+                        base64_str = inline_data.get("data", "")
+                        try:
+                            image_tensor = NanoBananaNode.base64_to_image(base64_str)
+                            print(f"[NanoBanana Multi] Request {request_index + 1} completed successfully")
+                        except Exception as e:
+                            print(f"[NanoBanana Multi] Request {request_index + 1} image decode error: {e}")
+
+            # Calculate stats
+            usage_metadata = result.get("usageMetadata", {})
+            prompt_tokens = usage_metadata.get("promptTokenCount", 0)
+            completion_tokens = usage_metadata.get("candidatesTokenCount", 0)
+            elapsed_time = end_time - start_time
+            tps = completion_tokens / elapsed_time if elapsed_time > 0 else 0
+
+            stats_text = f"TPS: {tps:.2f}, Time: {elapsed_time:.1f}s, Tokens: {prompt_tokens + completion_tokens}"
+            
+            return (image_tensor, stats_text)
+
+        except Exception as e:
+            print(f"[NanoBanana Multi] Request {request_index + 1} error: {e}")
+            return (placeholder_image, f"Error: {str(e)[:100]}")
+
+    @classmethod
+    def IS_CHANGED(cls, system_prompt, user_message_box, model, num_outputs,
+                   use_same_prompt, prompt_separator, temperature, timeout,
+                   image_generation=False, **kwargs):
+        """
+        Check if any input that affects the output has changed.
+        """
+        image_hashes = []
+        image_keys = sorted([k for k in kwargs.keys() if k.startswith('image_')], 
+                           key=lambda x: int(x.split('_')[1]))
+        
+        for image_key in image_keys:
+            if kwargs[image_key] is not None:
+                image = kwargs[image_key]
+                if isinstance(image, torch.Tensor):
+                    try:
+                        hasher = hashlib.sha256()
+                        hasher.update(image.cpu().numpy().tobytes())
+                        image_hashes.append(hasher.hexdigest())
+                    except Exception as e:
+                        image_hashes.append(f"{image_key}_hashing_error")
+
+        try:
+            temp_float = float(temperature)
+            temp_float = max(0.0, min(2.0, temp_float))
+        except (ValueError, TypeError):
+            temp_float = 0.9
+
+        return (system_prompt, user_message_box, model, num_outputs,
+                use_same_prompt, prompt_separator, temp_float, 
+                image_generation, tuple(image_hashes))
+
+
+# Update node class mappings
+NODE_CLASS_MAPPINGS["NanoBananaMultipleOutputsNode"] = NanoBananaMultipleOutputsNode
+NODE_DISPLAY_NAME_MAPPINGS["NanoBananaMultipleOutputsNode"] = "Nano Banana (Pro) Node Multiple Outputs"
