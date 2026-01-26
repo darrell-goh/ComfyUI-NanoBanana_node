@@ -20,25 +20,20 @@ const NODE_IDS = ["NanoBananaNode", "NanoBananaMultipleOutputsNode"];
 const PREFIX = "image";
 const TYPE = "IMAGE";
 const MAX_IMAGES = 14; // Nano Banana Pro limit
+const PERMANENT_IMAGES = 4; // image_1 through image_4 are permanent (defined in Python)
 
 /**
  * Applies dynamic image input behavior to a node
+ * image_1 through image_4 are permanent (defined in Python INPUT_TYPES)
+ * image_5 onwards are dynamically added/removed
  */
 function applyDynamicImageInputs(nodeType) {
     const onNodeCreated = nodeType.prototype.onNodeCreated;
     nodeType.prototype.onNodeCreated = function () {
         const me = onNodeCreated?.apply(this);
         
-        // Start with a new dynamic input - exactly like cozy example
-        this.addInput(PREFIX, TYPE);
-        
-        // Ensure the new slot has proper appearance
-        const slot = this.inputs[this.inputs.length - 1];
-        if (slot) {
-            slot.color_off = "#666";
-        }
-        
-        // Initialize aspect ratio display text
+        // Don't add initial dynamic input - we already have image_1 to image_4 from Python
+        // Just initialize the aspect ratio display text
         this.aspectRatioText = null;
         
         return me;
@@ -73,6 +68,30 @@ function applyDynamicImageInputs(nodeType) {
                 return me;
             }
             
+            // Helper to check if a slot is a permanent image input (image_1 through image_4)
+            const isPermanentSlot = (slotName) => {
+                const match = slotName.match(/^image_(\d+)$/);
+                if (match) {
+                    const num = parseInt(match[1]);
+                    return num >= 1 && num <= PERMANENT_IMAGES;
+                }
+                return false;
+            };
+            
+            // Helper to check if a slot is dynamic (image_5+)
+            const isDynamicSlot = (slotName) => {
+                // Slots named just "image" or "image_" are dynamic (pending naming)
+                if (slotName === PREFIX || slotName === `${PREFIX}_`) {
+                    return true;
+                }
+                const match = slotName.match(/^image_(\d+)$/);
+                if (match) {
+                    const num = parseInt(match[1]);
+                    return num > PERMANENT_IMAGES;
+                }
+                return false;
+            };
+            
             if (link_info && event === TypeSlotEvent.Connect) {
                 // Get the parent (left side node) from the link
                 const fromNode = this.graph._nodes.find(
@@ -82,70 +101,84 @@ function applyDynamicImageInputs(nodeType) {
                 if (fromNode) {
                     // Make sure there is a parent for the link
                     const parent_link = fromNode.outputs[link_info.origin_slot];
-                    if (parent_link) {
+                    if (parent_link && isDynamicSlot(node_slot.name)) {
                         node_slot.type = parent_link.type;
                         node_slot.name = `${PREFIX}_`;
                     }
                 }
-            } else if (event === TypeSlotEvent.Disconnect) {
-                // Don't remove the slot immediately, let the cleanup below handle it
             }
 
-            // Track each slot name so we can index the uniques
-            let idx = 0;
-            let slot_tracker = {};
+            // Count connected images and track dynamic slots
+            let dynamicSlotCount = 0;
             let toRemove = [];
             
-            for(const slot of this.inputs) {
+            for (let idx = 0; idx < this.inputs.length; idx++) {
+                const slot = this.inputs[idx];
+                
                 // Skip non-image inputs
                 if (!slot.name.startsWith(PREFIX)) {
-                    idx += 1;
                     continue;
                 }
                 
-                // Mark empty image slots for removal (except the last one)
-                if (slot.link === null && idx < this.inputs.length - 1) {
-                    toRemove.push(idx);
-                } else if (slot.link !== null) {
-                    // Connected slot - update its name with proper index
-                    const name = slot.name.split('_')[0];
-                    let count = (slot_tracker[name] || 0) + 1;
-                    slot_tracker[name] = count;
-                    slot.name = `${name}_${count}`;
+                // Skip permanent slots (image_1 through image_4) - never remove these
+                if (isPermanentSlot(slot.name)) {
+                    continue;
                 }
-                idx += 1;
+                
+                // This is a dynamic slot
+                if (slot.link === null) {
+                    // Empty dynamic slot - mark for removal unless it's the last dynamic slot
+                    toRemove.push(idx);
+                } else {
+                    // Connected dynamic slot - update its name
+                    dynamicSlotCount++;
+                    slot.name = `${PREFIX}_${PERMANENT_IMAGES + dynamicSlotCount}`;
+                }
+            }
+            
+            // Keep the last empty dynamic slot (if any), remove the rest
+            if (toRemove.length > 0) {
+                // Keep the last one in the list (highest index)
+                toRemove.pop();
             }
             
             // Remove empty slots from highest index to lowest
             toRemove.reverse();
-            for(const removeIdx of toRemove) {
+            for (const removeIdx of toRemove) {
                 this.removeInput(removeIdx);
             }
 
-            // Check if the last input is an image input
-            let lastInput = null;
-            for (let i = this.inputs.length - 1; i >= 0; i--) {
-                if (this.inputs[i].name.startsWith(PREFIX)) {
-                    lastInput = this.inputs[i];
-                    break;
-                }
-            }
-            
-            // Count current connected image inputs
+            // Count total connected image inputs (permanent + dynamic)
             const connectedImageCount = this.inputs.filter(
                 slot => slot.name.startsWith(PREFIX) && slot.link !== null
             ).length;
             
-            // If there's no empty image slot at the end, or no image slots at all, add one
-            // But only if we haven't reached the maximum
-            if (!lastInput || lastInput.link !== null) {
-                if (connectedImageCount < MAX_IMAGES) {
-                    this.addInput(PREFIX, TYPE);
-                    // Set the unconnected slot to appear gray
-                    const newSlot = this.inputs[this.inputs.length - 1];
-                    if (newSlot) {
-                        newSlot.color_off = "#666";
-                    }
+            // Check if we need to add a new dynamic slot
+            // Find the last image input
+            let lastImageInput = null;
+            for (let i = this.inputs.length - 1; i >= 0; i--) {
+                if (this.inputs[i].name.startsWith(PREFIX)) {
+                    lastImageInput = this.inputs[i];
+                    break;
+                }
+            }
+            
+            // Add a new dynamic slot if:
+            // 1. All permanent slots are connected, AND
+            // 2. The last image slot is connected (or doesn't exist), AND
+            // 3. We haven't reached the maximum
+            const allPermanentConnected = this.inputs
+                .filter(s => isPermanentSlot(s.name))
+                .every(s => s.link !== null);
+            
+            if (allPermanentConnected && 
+                (!lastImageInput || lastImageInput.link !== null || isPermanentSlot(lastImageInput.name)) && 
+                connectedImageCount < MAX_IMAGES) {
+                this.addInput(`${PREFIX}_${PERMANENT_IMAGES + dynamicSlotCount + 1}`, TYPE);
+                // Set the unconnected slot to appear gray
+                const newSlot = this.inputs[this.inputs.length - 1];
+                if (newSlot) {
+                    newSlot.color_off = "#666";
                 }
             }
 

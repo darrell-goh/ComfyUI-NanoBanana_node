@@ -202,6 +202,12 @@ class NanoBananaNode:
                     "display": "slider"
                 }),
                 "chat_mode": ("BOOLEAN", {"default": False}),
+            },
+            "optional": {
+                "image_1": ("IMAGE",),
+                "image_2": ("IMAGE",),
+                "image_3": ("IMAGE",),
+                "image_4": ("IMAGE",),
             }
         }
 
@@ -795,6 +801,12 @@ class NanoBananaMultipleOutputsNode:
                     "step": 10,
                     "display": "slider"
                 }),
+            },
+            "optional": {
+                "image_1": ("IMAGE",),
+                "image_2": ("IMAGE",),
+                "image_3": ("IMAGE",),
+                "image_4": ("IMAGE",),
             }
         }
 
