@@ -4,6 +4,7 @@
  */
 
 import { app } from "../../../scripts/app.js"
+import { api } from "../../../scripts/api.js"
 
 const TypeSlot = {
     Input: 1,
@@ -37,7 +38,29 @@ function applyDynamicImageInputs(nodeType) {
             slot.color_off = "#666";
         }
         
+        // Initialize aspect ratio display text
+        this.aspectRatioText = null;
+        
         return me;
+    }
+    
+    // Override onDrawForeground to display aspect ratio on the node
+    const onDrawForeground = nodeType.prototype.onDrawForeground;
+    nodeType.prototype.onDrawForeground = function(ctx) {
+        const ret = onDrawForeground?.apply(this, arguments);
+        
+        // Draw aspect ratio text if available
+        if (this.aspectRatioText) {
+            ctx.save();
+            ctx.font = "12px Arial";
+            ctx.fillStyle = "#8f8";
+            ctx.textAlign = "right";
+            // Position at top-right of node
+            ctx.fillText(this.aspectRatioText, this.size[0] - 10, -8);
+            ctx.restore();
+        }
+        
+        return ret;
     }
 
     const onConnectionsChange = nodeType.prototype.onConnectionsChange
@@ -137,6 +160,28 @@ function applyDynamicImageInputs(nodeType) {
 
 app.registerExtension({
     name: 'NanoBanana.DynamicImageInputs',
+    async setup() {
+        // Listen for aspect ratio messages from the server
+        api.addEventListener("nanobanana.aspect_ratio", (event) => {
+            const { aspect_ratio, was_auto, node_type } = event.detail;
+            
+            // Find the currently executing node (or most recently executed Nano Banana node)
+            const runningNodeId = app.runningNodeId;
+            if (runningNodeId) {
+                const node = app.graph.getNodeById(runningNodeId);
+                if (node && NODE_IDS.includes(node.comfyClass)) {
+                    // Update the aspect ratio text on the node
+                    if (was_auto) {
+                        node.aspectRatioText = `Auto → ${aspect_ratio}`;
+                    } else {
+                        node.aspectRatioText = aspect_ratio !== "None" ? aspect_ratio : "";
+                    }
+                    // Redraw the node
+                    app.graph.setDirtyCanvas(true);
+                }
+            }
+        });
+    },
     async beforeRegisterNodeDef(nodeType, nodeData, app) {
         // Skip if not one of our nodes
         if (!NODE_IDS.includes(nodeData.name)) {

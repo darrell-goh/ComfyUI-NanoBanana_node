@@ -10,10 +10,144 @@ import tiktoken
 from PIL import Image
 import hashlib
 from dotenv import load_dotenv
+
+# Import ComfyUI's server for sending messages to the frontend
+try:
+    from server import PromptServer
+    HAS_SERVER = True
+except ImportError:
+    HAS_SERVER = False
+    print("[NanoBanana] PromptServer not available, aspect ratio display on node disabled")
 from .chat_manager import ChatSessionManager
 
 # Load environment variables from .env file
 load_dotenv()
+
+# Maximum number of parallel outputs
+MAX_OUTPUTS = 5
+# Maximum number of images to display dynamic inputs for
+MAX_IMAGES = 14
+
+# Supported aspect ratios with their numeric values (width / height)
+SUPPORTED_ASPECT_RATIOS = {
+    "1:1": 1.0,
+    "4:3": 4/3,
+    "3:4": 3/4,
+    "16:9": 16/9,
+    "9:16": 9/16,
+    "3:2": 3/2,
+    "2:3": 2/3,
+    "5:4": 5/4,
+    "4:5": 4/5,
+    "21:9": 21/9,
+}
+
+def calculate_aspect_ratio(image):
+    """
+    Calculate the closest standard aspect ratio from an image tensor.
+    Uses logarithmic comparison for more accurate ratio matching.
+    
+    Args:
+        image: A torch.Tensor in BHWC or HWC format, or a numpy array
+        
+    Returns:
+        A string like "16:9", "4:3", etc. representing the closest standard ratio
+    """
+    import math
+    
+    width = None
+    height = None
+    
+    # Handle torch.Tensor
+    if isinstance(image, torch.Tensor):
+        try:
+            if image.ndim == 4:
+                # BHWC format: Batch, Height, Width, Channels
+                height = int(image.shape[1])
+                width = int(image.shape[2])
+            elif image.ndim == 3:
+                # HWC format: Height, Width, Channels
+                height = int(image.shape[0])
+                width = int(image.shape[1])
+            elif image.ndim == 2:
+                # HW format (grayscale): Height, Width
+                height = int(image.shape[0])
+                width = int(image.shape[1])
+        except (IndexError, TypeError) as e:
+            print(f"[Aspect Ratio] Error extracting dimensions from tensor: {e}")
+    
+    # Handle numpy array
+    elif isinstance(image, np.ndarray):
+        try:
+            if image.ndim == 4:
+                height = int(image.shape[1])
+                width = int(image.shape[2])
+            elif image.ndim == 3:
+                height = int(image.shape[0])
+                width = int(image.shape[1])
+            elif image.ndim == 2:
+                height = int(image.shape[0])
+                width = int(image.shape[1])
+        except (IndexError, TypeError) as e:
+            print(f"[Aspect Ratio] Error extracting dimensions from numpy array: {e}")
+    
+    # Handle PIL Image
+    elif hasattr(image, 'size'):
+        try:
+            width, height = image.size
+        except Exception as e:
+            print(f"[Aspect Ratio] Error extracting dimensions from PIL Image: {e}")
+    
+    # Handle tuple/list of (width, height) or (height, width)
+    elif isinstance(image, (tuple, list)) and len(image) >= 2:
+        try:
+            # Assume (height, width) for consistency with tensor shapes
+            height = int(image[0])
+            width = int(image[1])
+        except (ValueError, TypeError) as e:
+            print(f"[Aspect Ratio] Error extracting dimensions from tuple/list: {e}")
+    
+    # Validate extracted dimensions
+    if width is None or height is None:
+        print(f"[Aspect Ratio] Could not extract dimensions, using 1:1")
+        return "1:1"
+    
+    if height <= 0:
+        print(f"[Aspect Ratio] Invalid height ({height}), using 1:1")
+        return "1:1"
+    
+    if width <= 0:
+        print(f"[Aspect Ratio] Invalid width ({width}), using 1:1")
+        return "1:1"
+    
+    # Calculate the actual aspect ratio
+    actual_ratio = width / height
+    
+    # Use logarithmic comparison for better ratio matching
+    # This treats going from 1:1 to 2:1 the same as going from 2:1 to 4:1
+    # (i.e., proportional changes rather than absolute differences)
+    log_actual = math.log(actual_ratio)
+    
+    closest_name = "1:1"
+    min_log_diff = float('inf')
+    
+    for name, ratio_value in SUPPORTED_ASPECT_RATIOS.items():
+        log_ratio = math.log(ratio_value)
+        log_diff = abs(log_actual - log_ratio)
+        
+        if log_diff < min_log_diff:
+            min_log_diff = log_diff
+            closest_name = name
+    
+    # Calculate percentage difference for logging
+    closest_value = SUPPORTED_ASPECT_RATIOS[closest_name]
+    pct_diff = abs(actual_ratio - closest_value) / closest_value * 100
+    
+    print(f"[Aspect Ratio] Image: {width}x{height}, Ratio: {actual_ratio:.4f}")
+    print(f"[Aspect Ratio] Closest match: {closest_name} ({closest_value:.4f}), Diff: {pct_diff:.1f}%")
+    
+    return closest_name
+
 
 class NanoBananaNode:
     """
@@ -51,7 +185,7 @@ class NanoBananaNode:
                 "model": (cls.fetch_nano_banana_models(), {"default": "gemini-3-pro-image-preview"}),
                 "image_generation": ("BOOLEAN", {"default": True}),
                 "resolution": (["2K", "4K"], {"default": "4K"}),
-                "aspect_ratio": (["Auto", "1:1", "4:3", "3:4", "16:9", "9:16", "3:2", "2:3", "5:4", "4:5", "21:9"], {"default": "Auto"}),
+                "aspect_ratio": (["None", "Auto", "1:1", "4:3", "3:4", "16:9", "9:16", "3:2", "2:3", "5:4", "4:5", "21:9"], {"default": "Auto"}),
                 "temperature": ("FLOAT", {
                     "default": 1.0,
                     "min": 0.0,
@@ -279,15 +413,37 @@ class NanoBananaNode:
             image_config = {
                 "image_size": resolution
             }
-            # Only include aspect_ratio if not set to "Auto"
-            if aspect_ratio != "Auto":
-                image_config["aspect_ratio"] = aspect_ratio
+            
+            # Handle aspect_ratio based on setting
+            final_aspect_ratio = aspect_ratio
+            if aspect_ratio == "Auto":
+                # Calculate aspect ratio from first input image if available
+                if image_keys:
+                    first_image = kwargs[image_keys[0]]
+                    final_aspect_ratio = calculate_aspect_ratio(first_image)
+                    print(f"[NanoBanana]   Calculated aspect ratio from input image: {final_aspect_ratio}", flush=True)
+                else:
+                    # No input images, don't send aspect_ratio (let API decide)
+                    final_aspect_ratio = "None"
+            
+            # Send aspect ratio info to frontend for display
+            if HAS_SERVER:
+                PromptServer.instance.send_sync("nanobanana.aspect_ratio", {
+                    "aspect_ratio": final_aspect_ratio,
+                    "was_auto": aspect_ratio == "Auto",
+                    "node_type": "NanoBananaNode"
+                })
+            
+            # Only include aspect_ratio if not set to "None"
+            if final_aspect_ratio != "None":
+                image_config["aspect_ratio"] = final_aspect_ratio
+            
             data["generationConfig"]["image_config"] = image_config
             # Request image output modality
             data["generationConfig"]["responseModalities"] = ["TEXT", "IMAGE"]
             print(f"[NanoBanana] Image generation enabled", flush=True)
             print(f"[NanoBanana]   Resolution: {resolution}", flush=True)
-            print(f"[NanoBanana]   Aspect Ratio: {aspect_ratio if aspect_ratio != 'Auto' else 'Auto (API default)'}", flush=True)
+            print(f"[NanoBanana]   Aspect Ratio: {final_aspect_ratio if final_aspect_ratio != 'None' else 'None (API default)'}", flush=True)
             print(f"[NanoBanana]   URL: {url}", flush=True)
 
         # --- Pre-calculate text input tokens (rough estimate) ---
@@ -578,17 +734,6 @@ class NanoBananaNode:
                 temp_float, chat_mode, image_generation, 
                 tuple(image_hashes))
 
-# Node class mappings
-NODE_CLASS_MAPPINGS = {
-    "NanoBananaNode": NanoBananaNode
-}
-
-# Node display name mappings
-NODE_DISPLAY_NAME_MAPPINGS = {
-    "NanoBananaNode": "Nano Banana (Pro) Node"
-}
-
-
 class NanoBananaMultipleOutputsNode:
     """
     A node for generating multiple parallel outputs from Vertex AI's generateContent API.
@@ -634,7 +779,7 @@ class NanoBananaMultipleOutputsNode:
                 }),
                 "image_generation": ("BOOLEAN", {"default": True}),
                 "resolution": (["2K", "4K"], {"default": "4K"}),
-                "aspect_ratio": (["Auto", "1:1", "4:3", "3:4", "16:9", "9:16", "3:2", "2:3", "5:4", "4:5", "21:9"], {"default": "Auto"}),
+                "aspect_ratio": (["None", "Auto", "1:1", "4:3", "3:4", "16:9", "9:16", "3:2", "2:3", "5:4", "4:5", "21:9"], {"default": "Auto"}),
                 "temperature": ("FLOAT", {
                     "default": 0.9,
                     "min": 0.0,
@@ -735,6 +880,28 @@ class NanoBananaMultipleOutputsNode:
         image_keys = sorted([k for k in kwargs.keys() if k.startswith('image_')], 
                            key=lambda x: int(x.split('_')[1]))
         
+        # Handle aspect_ratio: Calculate if Auto, otherwise use provided value
+        final_aspect_ratio = aspect_ratio
+        if aspect_ratio == "Auto":
+            # Calculate aspect ratio from first input image if available
+            if image_keys:
+                first_image = kwargs[image_keys[0]]
+                final_aspect_ratio = calculate_aspect_ratio(first_image)
+                print(f"[NanoBanana Multi]   Calculated aspect ratio from input image: {final_aspect_ratio}", flush=True)
+            else:
+                # No input images, don't send aspect_ratio (let API decide)
+                final_aspect_ratio = "None"
+        
+        # Send aspect ratio info to frontend for display
+        if HAS_SERVER:
+            PromptServer.instance.send_sync("nanobanana.aspect_ratio", {
+                "aspect_ratio": final_aspect_ratio,
+                "was_auto": aspect_ratio == "Auto",
+                "node_type": "NanoBananaMultipleOutputsNode"
+            })
+        
+        # Process image inputs
+        
         # Model-specific image limits
         if "gemini-2.5-flash-image" in model.lower() or "gemini-2-5-flash-image" in model.lower():
             max_images = 6
@@ -770,7 +937,7 @@ class NanoBananaMultipleOutputsNode:
             try:
                 return self._single_generate_request(
                     system_prompt, prompt_text, model, validated_temp,
-                    timeout, image_generation, resolution, aspect_ratio,
+                    timeout, image_generation, resolution, final_aspect_ratio,
                     image_data, api_key, index
                 )
             except Exception as e:
@@ -873,8 +1040,8 @@ class NanoBananaMultipleOutputsNode:
             image_config = {
                 "image_size": resolution
             }
-            # Only include aspect_ratio if not set to "Auto"
-            if aspect_ratio != "Auto":
+            # Only include aspect_ratio if not set to "None"
+            if aspect_ratio != "None":
                 image_config["aspect_ratio"] = aspect_ratio
             data["generationConfig"]["image_config"] = image_config
             data["generationConfig"]["responseModalities"] = ["TEXT", "IMAGE"]
@@ -960,6 +1127,14 @@ class NanoBananaMultipleOutputsNode:
                 image_generation, tuple(image_hashes))
 
 
-# Update node class mappings
-NODE_CLASS_MAPPINGS["NanoBananaMultipleOutputsNode"] = NanoBananaMultipleOutputsNode
-NODE_DISPLAY_NAME_MAPPINGS["NanoBananaMultipleOutputsNode"] = "Nano Banana (Pro) Node Multiple Outputs"
+# Node class mappings
+NODE_CLASS_MAPPINGS = {
+    "NanoBananaNode": NanoBananaNode,
+    "NanoBananaMultipleOutputsNode": NanoBananaMultipleOutputsNode,
+}
+
+# Node display name mappings
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "NanoBananaNode": "Nano Banana (Pro) Node",
+    "NanoBananaMultipleOutputsNode": "Nano Banana (Pro) Node with Multiple Outputs",
+}
