@@ -2,7 +2,7 @@
 
 A custom node for ComfyUI that provides seamless integration with Google Vertex AI REST API format, featuring dynamic image inputs, chat mode functionality, and parallel image generation.
 
-This project is derived from the design and structural patterns of the [ComfyUI-Openrouter_node](https://github.com/gabe-init/ComfyUI-Openrouter_node) project by **@gabe-init**, from which elements such as dynamic image input handling and general node architecture principles were adapted. The original work is licensed under the MIT Licence, and its licence is included in this repository in accordance with its terms.
+This project is derived from the design and structural patterns of the [ComfyUI-Openrouter_node](https://github.com/gabe-init/ComfyUI-Openrouter_node) project by [**@gabe-init**](https://github.com/gabe-init), from which elements such as dynamic image input handling and general node architecture principles were adapted. The original work is licensed under the MIT Licence, and its licence is included in this repository in accordance with its terms.
 
 This project is an independent implementation focused solely on Nano Banana and Vertex AI integration and does not provide OpenRouter functionality.
 
@@ -74,7 +74,7 @@ Standard node for single image generation with chat mode support.
 - **model**: The Gemini model to use (configured via environment variables)
 - **image_generation**: Enable image generation for supported models
 - **resolution**: Image output resolution - `2K` or `4K`
-- **aspect_ratio**: Image aspect ratio - `Auto` (API default), `1:1`, `4:3`, `3:4`, `16:9`, `9:16`, `3:2`, `2:3`, `5:4`, `4:5`, `21:9`. When set to `Auto`, the aspect ratio parameter is omitted and the API uses its default behavior.
+- **aspect_ratio**: Image aspect ratio - `None` (API default), `Auto` (calculate from input image), `1:1`, `4:3`, `3:4`, `16:9`, `9:16`, `3:2`, `2:3`, `5:4`, `4:5`, `21:9`. When set to `Auto`, the aspect ratio is calculated from the first input image. When set to `None`, the parameter is omitted.
 - **temperature**: Controls the randomness of output (0.0 to 1.0)
 - **timeout**: Request timeout in seconds (30-600s, default: 300s) - increase for slower responses or 4K generation
 - **chat_mode**: Enable conversation mode to maintain context across messages
@@ -105,7 +105,7 @@ Generate multiple image variations in parallel with a single execution.
 - **prompt_separator**: Delimiter to separate multiple prompts (default: `---`)
 - **image_generation**: Enable image generation for supported models
 - **resolution**: Image output resolution - `2K` or `4K`
-- **aspect_ratio**: Image aspect ratio - `Auto` (API default), `1:1`, `4:3`, `3:4`, `16:9`, `9:16`, `3:2`, `2:3`, `5:4`, `4:5`, `21:9`. When set to `Auto`, the aspect ratio parameter is omitted and the API uses its default behavior.
+- **aspect_ratio**: Image aspect ratio - `None` (API default), `Auto` (calculate from input image), `1:1`, `4:3`, `3:4`, `16:9`, `9:16`, `3:2`, `2:3`, `5:4`, `4:5`, `21:9`. When set to `Auto`, the aspect ratio is calculated from the first input image. When set to `None`, the parameter is omitted.
 - **temperature**: Controls randomness (0.0 to 0.95) - automatically limited to 0.95 when using same prompt for variations
 - **timeout**: Request timeout in seconds (30-600s, default: 300s)
 
@@ -242,7 +242,13 @@ Configure your available models in the `.env` file.
 
 ## Version History
 
-### v1.2.0 (Current)
+### v1.2.1 (Current)
+- **Auto aspect ratio calculation**: When set to `Auto`, aspect ratio is now calculated from the first input image using logarithmic comparison for accurate matching
+- **On-node display**: Calculated aspect ratio is displayed on the node during execution (e.g., "Auto → 16:9")
+- **None option**: Added `None` option to let the API decide the aspect ratio
+- Improved robustness of aspect ratio calculation with support for multiple input formats
+
+### v1.2.0
 - Added **Nano Banana (Pro) Node Multiple Outputs** for parallel generation
 - Support for up to 5 parallel image generations with configurable prompts
 - Temperature automatically capped at 0.95 when using same prompt for variations
@@ -270,4 +276,4 @@ MIT License - See LICENSE file for details
 ## Credits
 
 - [ComfyUI](https://github.com/comfyanonymous/ComfyUI) - The amazing ComfyUI framework
-- @gabe-init – Original OpenRouter node design that inspired the dynamic input and node structure
+- [@gabe-init](https://github.com/gabe-init) – Original OpenRouter node design that inspired the dynamic input and node structure
