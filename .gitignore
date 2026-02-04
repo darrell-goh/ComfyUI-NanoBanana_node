@@ -26,6 +26,7 @@ wheels/
 env/
 venv/
 ENV/
+test*
 
 # IDE
 .idea/
@@ -46,3 +47,5 @@ secrets.json
 
 # Data
 chats/
+logs/
+package/

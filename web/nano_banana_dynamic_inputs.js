@@ -38,28 +38,71 @@ function applyDynamicImageInputs(nodeType) {
             slot.color_off = "#666";
         }
         
-        // Initialize aspect ratio display text
+        // Initialize aspect ratio display text and usage metadata
         this.aspectRatioText = null;
-        
+        this.usageMetadata = null;
+
         return me;
     }
     
-    // Override onDrawForeground to display aspect ratio on the node
+    // Override onDrawForeground to display aspect ratio and usage metadata on the node
     const onDrawForeground = nodeType.prototype.onDrawForeground;
     nodeType.prototype.onDrawForeground = function(ctx) {
         const ret = onDrawForeground?.apply(this, arguments);
-        
-        // Draw aspect ratio text if available
+
+        ctx.save();
+        ctx.font = "11px Arial";
+        ctx.textAlign = "center";
+
+        // Position below the title, centered horizontally
+        let yOffset = 18;  // Start below the title bar
+        const lineHeight = 14;
+        const xPos = this.size[0] / 2;  // Center of node
+
+        // Draw aspect ratio (green) - existing functionality
         if (this.aspectRatioText) {
-            ctx.save();
-            ctx.font = "12px Arial";
             ctx.fillStyle = "#8f8";
-            ctx.textAlign = "right";
-            // Position at top-right of node
-            ctx.fillText(this.aspectRatioText, this.size[0] - 10, -8);
-            ctx.restore();
+            ctx.fillText(this.aspectRatioText, xPos, yOffset);
+            yOffset += lineHeight;
         }
-        
+
+        // Draw usage metadata (top to bottom)
+        if (this.usageMetadata) {
+            const meta = this.usageMetadata;
+
+            // Processing time (cyan) - with parallel indicator if applicable
+            if (meta.processingTimeMs) {
+                ctx.fillStyle = "#8ff";
+                const timeText = meta.parallelRequests && meta.parallelRequests > 1
+                    ? `${(meta.processingTimeMs / 1000).toFixed(1)}s (${meta.parallelRequests}x)`
+                    : `${(meta.processingTimeMs / 1000).toFixed(1)}s`;
+                ctx.fillText(timeText, xPos, yOffset);
+                yOffset += lineHeight;
+            }
+
+            // Candidates/Output tokens (yellow)
+            if (meta.candidatesTokenCount) {
+                ctx.fillStyle = "#ff8";
+                ctx.fillText(`Out: ${meta.candidatesTokenCount}`, xPos, yOffset);
+                yOffset += lineHeight;
+            }
+
+            // Thoughts tokens (magenta, if present - indicates reasoning model)
+            if (meta.thoughtsTokenCount && meta.thoughtsTokenCount > 0) {
+                ctx.fillStyle = "#f8f";
+                ctx.fillText(`Think: ${meta.thoughtsTokenCount}`, xPos, yOffset);
+                yOffset += lineHeight;
+            }
+
+            // Total tokens (yellow)
+            if (meta.totalTokenCount) {
+                ctx.fillStyle = "#ff8";
+                ctx.fillText(`Total: ${meta.totalTokenCount}`, xPos, yOffset);
+                yOffset += lineHeight;
+            }
+        }
+
+        ctx.restore();
         return ret;
     }
 
@@ -118,7 +161,7 @@ function applyDynamicImageInputs(nodeType) {
             
             // Remove empty slots from highest index to lowest
             toRemove.reverse();
-            for(const removeIdx of toRemove) {
+            for (const removeIdx of toRemove) {
                 this.removeInput(removeIdx);
             }
 
@@ -176,6 +219,27 @@ app.registerExtension({
                     } else {
                         node.aspectRatioText = aspect_ratio !== "None" ? aspect_ratio : "";
                     }
+                    // Redraw the node
+                    app.graph.setDirtyCanvas(true);
+                }
+            }
+        });
+
+        // Listen for usage metadata messages from the server
+        api.addEventListener("nanobanana.usage_metadata", (event) => {
+            const { node_id, metadata, model, node_type } = event.detail;
+
+            // Find the currently executing node
+            const runningNodeId = app.runningNodeId;
+            if (runningNodeId) {
+                const node = app.graph.getNodeById(runningNodeId);
+                if (node && NODE_IDS.includes(node.comfyClass)) {
+                    // Store metadata for display
+                    node.usageMetadata = metadata;
+
+                    // Log to browser console for debugging
+                    console.log(`[NanoBanana] Node ${runningNodeId} metadata:`, metadata);
+
                     // Redraw the node
                     app.graph.setDirtyCanvas(true);
                 }

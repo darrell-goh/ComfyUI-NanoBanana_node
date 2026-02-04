@@ -14,7 +14,7 @@ This project is an independent implementation focused solely on Nano Banana and 
 - **Dynamic Image Inputs** - Automatically adds new image input slots as you connect images
   - Up to 14 images for Gemini 3 Pro Image models
   - Up to 6 images for Gemini 2.5 Flash Image models
-- **Image Generation Support** - Generate images with Gemini models through Vertex API with customizable resolution (2K/4K) and aspect ratios
+- **Image Generation Support** - Generate images with Gemini models through Vertex API with customizable resolution (1K/2K/4K) and aspect ratios
 - **Parallel Generation** - Create multiple image variations simultaneously with configurable temperature control
 - **Chat Mode** - Maintain conversation context across multiple messages with automatic session management (single output node only)
 - **Multi-Image Support** - Send multiple images in a single request to supported Gemini models
@@ -73,7 +73,7 @@ Standard node for single image generation with chat mode support.
 - **user_message_box**: The user message to send to the model
 - **model**: The Gemini model to use (configured via environment variables)
 - **image_generation**: Enable image generation for supported models
-- **resolution**: Image output resolution - `2K` or `4K`
+- **resolution**: Image output resolution - `1K` or `2K` or `4K`
 - **aspect_ratio**: Image aspect ratio - `None` (API default), `Auto` (calculate from input image), `1:1`, `4:3`, `3:4`, `16:9`, `9:16`, `3:2`, `2:3`, `5:4`, `4:5`, `21:9`. When set to `Auto`, the aspect ratio is calculated from the first input image. When set to `None`, the parameter is omitted.
 - **temperature**: Controls the randomness of output (0.0 to 1.0)
 - **timeout**: Request timeout in seconds (30-600s, default: 300s) - increase for slower responses or 4K generation
@@ -90,6 +90,7 @@ Standard node for single image generation with chat mode support.
 - **STRING (Text Output)**: The text response from the model
 - **IMAGE**: An image tensor if the response contains a generated image
 - **Stats**: Token usage statistics (TPS, prompt tokens, completion tokens, temperature, model)
+- **Thoughts**: Model's reasoning/thinking content (if supported by the model)
 
 ### Nano Banana (Pro) Node Multiple Outputs
 
@@ -117,6 +118,7 @@ Generate multiple image variations in parallel with a single execution.
 
 - **IMAGE_1** through **IMAGE_5**: Up to 5 parallel generated images
 - **Stats**: Combined statistics for all parallel requests
+- **Thoughts**: Combined reasoning/thinking content from all parallel requests (if supported)
 
 #### Usage Modes:
 
@@ -145,7 +147,7 @@ Generate multiple image variations in parallel with a single execution.
 1. Set a system prompt
 2. Enter a generation prompt (e.g., "Generate a beautiful sunset over mountains")
 3. Enable the "image_generation" option
-4. Select resolution (`2K` or `4K`)
+4. Select resolution (`1K` or `2K` or `4K`)
 5. Select aspect ratio (e.g., `16:9` for landscape, `9:16` for portrait, `1:1` for square, or `Auto` to let the API decide)
 6. Select an image-capable model (e.g., "gemini-3-pro-image-preview")
 7. Run the workflow
@@ -242,7 +244,14 @@ Configure your available models in the `.env` file.
 
 ## Version History
 
-### v1.2.1 (Current)
+### v1.3.0 (Current)
+- **Usage metadata display**: Processing time, token counts (output, thoughts, total) displayed on node during execution
+- **Per-instance logging**: Each node instance logs to its own file in `logs/` directory with detailed execution data
+- **Thoughts output**: New output for model reasoning/thinking content (when supported by the model)
+- **Parallel execution tracking**: Logs individual requests and summary for parallel generation
+- Added 1K option for resolution
+
+### v1.2.1
 - **Auto aspect ratio calculation**: When set to `Auto`, aspect ratio is now calculated from the first input image using logarithmic comparison for accurate matching
 - **On-node display**: Calculated aspect ratio is displayed on the node during execution (e.g., "Auto → 16:9")
 - **None option**: Added `None` option to let the API decide the aspect ratio

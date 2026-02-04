@@ -4,6 +4,8 @@ import time
 import base64
 import io
 import os
+import datetime
+from pathlib import Path
 import numpy as np
 import torch
 import tiktoken
@@ -41,6 +43,96 @@ SUPPORTED_ASPECT_RATIOS = {
     "4:5": 4/5,
     "21:9": 21/9,
 }
+
+
+class NodeLogger:
+    """
+    Manages per-instance log files for Nano Banana nodes.
+    Each node instance gets its own log file, with workflow runs separated.
+    """
+
+    def __init__(self):
+        self.base_path = Path(os.path.dirname(__file__)) / "logs"
+        self.base_path.mkdir(exist_ok=True)
+
+    def _get_log_filename(self, node_id: str) -> Path:
+        """Get the log file path for a specific node instance"""
+        return self.base_path / f"node_{node_id}.log"
+
+    def log_execution(self, node_id, workflow_run_id, metadata,
+                      model, prompt_preview=None, response_preview=None,
+                      request_index=None, total_requests=None, is_summary=False):
+        """
+        Log a node execution with all metadata.
+
+        Args:
+            node_id: Unique ID of the node instance
+            workflow_run_id: ID to identify this workflow execution run
+            metadata: UsageMetadata dictionary
+            model: Model name used
+            prompt_preview: First 200 chars of prompt (optional)
+            response_preview: First 200 chars of response (optional)
+            request_index: For parallel requests, which request this is (0-based)
+            total_requests: For parallel requests, total number of requests
+            is_summary: True if this is a summary log for parallel execution
+        """
+        log_file = self._get_log_filename(node_id)
+
+        log_entry = {
+            "timestamp": datetime.datetime.now().isoformat(),
+            "workflow_run_id": workflow_run_id,
+            "node_id": node_id,
+            "model": model,
+            "usage_metadata": metadata,
+            "prompt_preview": prompt_preview[:200] if prompt_preview else None,
+            "response_preview": response_preview[:200] if response_preview else None,
+        }
+
+        # Add parallel execution info if applicable
+        if request_index is not None:
+            log_entry["request_index"] = request_index
+            log_entry["total_requests"] = total_requests
+        if is_summary:
+            log_entry["is_summary"] = True
+
+        # Append to log file (JSON Lines format for easy parsing)
+        with open(log_file, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(log_entry) + "\n")
+
+        # Also print detailed console log
+        self._print_console_log(log_entry)
+
+    def _print_console_log(self, entry: dict):
+        """Print formatted log entry to console"""
+        metadata = entry.get("usage_metadata", {})
+        request_index = entry.get("request_index")
+        total_requests = entry.get("total_requests")
+        is_summary = entry.get("is_summary", False)
+
+        # Format header based on type
+        if is_summary:
+            header = "=== Parallel Execution Summary ==="
+        elif request_index is not None:
+            header = f"=== Parallel Request {request_index + 1}/{total_requests} ==="
+        else:
+            header = "=== Execution Log ==="
+
+        print(f"\n[NanoBanana] {header}", flush=True)
+        print(f"[NanoBanana] Timestamp: {entry['timestamp']}", flush=True)
+        print(f"[NanoBanana] Node ID: {entry['node_id']}", flush=True)
+        print(f"[NanoBanana] Workflow Run: {entry['workflow_run_id']}", flush=True)
+        print(f"[NanoBanana] Model: {entry['model']}", flush=True)
+        print(f"[NanoBanana] --- Usage Metadata ---", flush=True)
+        print(f"[NanoBanana] Processing Time: {metadata.get('processingTimeMs', 0):.0f}ms", flush=True)
+        print(f"[NanoBanana] Prompt Tokens: {metadata.get('promptTokenCount', 0)}", flush=True)
+        print(f"[NanoBanana] Candidates Tokens: {metadata.get('candidatesTokenCount', 0)}", flush=True)
+        print(f"[NanoBanana] Thoughts Tokens: {metadata.get('thoughtsTokenCount', 0)}", flush=True)
+        print(f"[NanoBanana] Total Tokens: {metadata.get('totalTokenCount', 0)}", flush=True)
+        print(f"[NanoBanana] Cached Content Tokens: {metadata.get('cachedContentTokenCount', 0)}", flush=True)
+        if is_summary and total_requests:
+            print(f"[NanoBanana] Parallel Requests: {total_requests}", flush=True)
+        print(f"[NanoBanana] =========================\n", flush=True)
+
 
 def calculate_aspect_ratio(image):
     """
@@ -184,7 +276,7 @@ class NanoBananaNode:
                 }),
                 "model": (cls.fetch_nano_banana_models(), {"default": "gemini-3-pro-image-preview"}),
                 "image_generation": ("BOOLEAN", {"default": True}),
-                "resolution": (["2K", "4K"], {"default": "4K"}),
+                "resolution": (["1K", "2K", "4K"], {"default": "4K"}),
                 "aspect_ratio": (["None", "Auto", "1:1", "4:3", "3:4", "16:9", "9:16", "3:2", "2:3", "5:4", "4:5", "21:9"], {"default": "Auto"}),
                 "temperature": ("FLOAT", {
                     "default": 1.0,
@@ -202,11 +294,14 @@ class NanoBananaNode:
                     "display": "slider"
                 }),
                 "chat_mode": ("BOOLEAN", {"default": False}),
+            },
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
             }
         }
 
-    RETURN_TYPES = ("STRING", "IMAGE", "STRING",)
-    RETURN_NAMES = ("STRING (Text Output)", "IMAGE", "Stats")
+    RETURN_TYPES = ("STRING", "IMAGE", "STRING", "STRING",)
+    RETURN_NAMES = ("STRING (Text Output)", "IMAGE", "Stats", "Thoughts")
 
     FUNCTION = "generate_response"
     CATEGORY = "LLM"
@@ -240,7 +335,7 @@ class NanoBananaNode:
 
     def generate_response(self, system_prompt, user_message_box, model,
                          temperature, timeout, chat_mode, image_generation=False,
-                         resolution="4K", aspect_ratio="1:1", **kwargs):
+                         resolution="4K", aspect_ratio="1:1", unique_id=None, **kwargs):
         """
         Sends a completion request to the Vertex AI generateContent endpoint.
         Handles text and optional image inputs.
@@ -256,7 +351,7 @@ class NanoBananaNode:
         # Get API key from environment variable
         api_key = os.getenv("VERTEX_AI_API_KEY", "")
         if not api_key:
-             return ("Error: VERTEX_AI_API_KEY not found in environment variables.", placeholder_image, "Stats N/A")
+             return ("Error: VERTEX_AI_API_KEY not found in environment variables.", placeholder_image, "Stats N/A", "")
 
         # Get endpoint configuration from environment variables
         endpoint_base = "https://aiplatform.googleapis.com/v1"
@@ -264,7 +359,7 @@ class NanoBananaNode:
         
         if use_simple_endpoint:
             if not os.getenv("VERTEX_AI_ENDPOINT"):
-                return ("Error: VERTEX_AI_ENDPOINT must be set when using simple endpoint format.", placeholder_image, "Stats N/A")
+                return ("Error: VERTEX_AI_ENDPOINT must be set when using simple endpoint format.", placeholder_image, "Stats N/A", "")
             # Simple endpoint format for Vertex AI: {endpoint}/google/{model}:generateContent
             endpoint_base = os.getenv("VERTEX_AI_ENDPOINT")
             url = f"{endpoint_base}/google/{model}:generateContent"
@@ -330,7 +425,7 @@ class NanoBananaNode:
             model_name = "this model"
         
         if len(image_keys) > max_images:
-            return (f"Error: Maximum of {max_images} input images allowed for {model_name}.", placeholder_image, "Stats N/A")
+            return (f"Error: Maximum of {max_images} input images allowed for {model_name}.", placeholder_image, "Stats N/A", "")
         
         for image_key in image_keys:
             if kwargs[image_key] is not None:
@@ -344,7 +439,7 @@ class NanoBananaNode:
                     })
                 except Exception as e:
                     print(f"Error processing {image_key}: {e}")
-                    return (f"Error processing {image_key}: {e}", placeholder_image, "Stats N/A")
+                    return (f"Error processing {image_key}: {e}", placeholder_image, "Stats N/A", "")
 
         # Determine message format based on content type
         # Use simple string format for text-only requests to ensure compatibility
@@ -396,7 +491,7 @@ class NanoBananaNode:
                 "temperature": validated_temp
             }
         }
-        
+
         # Add system instruction if present
         for msg in messages:
             if msg["role"] == "system":
@@ -490,11 +585,21 @@ class NanoBananaNode:
             #     print(f"[NanoBanana] Part {i} keys: {list(part.keys())}", flush=True)
             
             text_output = ""
+            thoughts_output = ""
             image_tensor = placeholder_image
-            
-            # Extract text and image from parts
+
+            # Extract text, thoughts, and image from parts
+            # Note: "thought" is a boolean flag indicating the part contains reasoning
+            # The actual content is still in "text" field
             for part in parts:
-                if "text" in part:
+                if part.get("thought") == True and "text" in part:
+                    # Model's internal reasoning/thinking (thought=True flag with text content)
+                    thought_text = part["text"]
+                    if isinstance(thought_text, str):
+                        thoughts_output += thought_text
+                        print(f"[NanoBanana] Found thought part: {len(thought_text)} chars", flush=True)
+                elif "text" in part and isinstance(part["text"], str):
+                    # Regular text output (no thought flag or thought=False)
                     text_output += part["text"]
                     print(f"[NanoBanana] Found text part: {len(part['text'])} chars", flush=True)
                 elif "inlineData" in part:
@@ -553,6 +658,39 @@ class NanoBananaNode:
                 f"Model: {model}"
             )
 
+            # Extract full usage metadata and calculate processing time
+            processing_time_ms = elapsed_time * 1000
+            full_metadata = {
+                "processingTimeMs": processing_time_ms,
+                "promptTokenCount": usage_metadata.get("promptTokenCount", 0),
+                "candidatesTokenCount": usage_metadata.get("candidatesTokenCount", 0),
+                "totalTokenCount": usage_metadata.get("totalTokenCount", 0),
+                "thoughtsTokenCount": usage_metadata.get("thoughtsTokenCount", 0),
+                "cachedContentTokenCount": usage_metadata.get("cachedContentTokenCount", 0),
+            }
+
+            # Send usage metadata to frontend for display
+            if HAS_SERVER:
+                PromptServer.instance.send_sync("nanobanana.usage_metadata", {
+                    "node_id": unique_id,
+                    "metadata": full_metadata,
+                    "model": model,
+                    "node_type": "NanoBananaNode"
+                })
+
+            # Log to per-instance log file
+            if unique_id:
+                workflow_run_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+                logger = NodeLogger()
+                logger.log_execution(
+                    node_id=str(unique_id),
+                    workflow_run_id=workflow_run_id,
+                    metadata=full_metadata,
+                    model=model,
+                    prompt_preview=user_text if user_text else None,
+                    response_preview=text_output if text_output else None
+                )
+
             # Save conversation in chat mode
             if chat_mode and session_path:
                 # Append assistant's response to the conversation
@@ -565,7 +703,7 @@ class NanoBananaNode:
                 # Save the updated conversation
                 self.chat_manager.save_conversation(session_path, messages)
 
-            return (text_output, image_tensor, stats_text)
+            return (text_output, image_tensor, stats_text, thoughts_output)
 
         except requests.exceptions.RequestException as e:
             error_message = f"API Request Error: {str(e)}"
@@ -581,12 +719,12 @@ class NanoBananaNode:
             else:
                  error_message += " (Network or connection issue)" # Generic network error
 
-            return (error_message, placeholder_image, "Stats N/A due to error")
+            return (error_message, placeholder_image, "Stats N/A due to error", "")
         except Exception as e: # Catch other potential errors (e.g., JSON parsing, value errors)
             import traceback
             print(f"[NanoBanana] Exception: {e}", flush=True)
             print(f"[NanoBanana] Traceback: {traceback.format_exc()}", flush=True)
-            return (f"Node Error: {str(e)}", placeholder_image, "Stats N/A due to error")
+            return (f"Node Error: {str(e)}", placeholder_image, "Stats N/A due to error", "")
 
     @staticmethod
     def image_to_base64(image):
@@ -778,7 +916,7 @@ class NanoBananaMultipleOutputsNode:
                     "multiline": False
                 }),
                 "image_generation": ("BOOLEAN", {"default": True}),
-                "resolution": (["2K", "4K"], {"default": "4K"}),
+                "resolution": (["1K", "2K", "4K"], {"default": "4K"}),
                 "aspect_ratio": (["None", "Auto", "1:1", "4:3", "3:4", "16:9", "9:16", "3:2", "2:3", "5:4", "4:5", "21:9"], {"default": "Auto"}),
                 "temperature": ("FLOAT", {
                     "default": 0.9,
@@ -795,11 +933,14 @@ class NanoBananaMultipleOutputsNode:
                     "step": 10,
                     "display": "slider"
                 }),
+            },
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
             }
         }
 
-    RETURN_TYPES = tuple(["IMAGE"] * MAX_OUTPUTS + ["STRING"])
-    RETURN_NAMES = tuple([f"IMAGE_{i+1}" for i in range(MAX_OUTPUTS)] + ["Stats"])
+    RETURN_TYPES = tuple(["IMAGE"] * MAX_OUTPUTS + ["STRING", "STRING"])
+    RETURN_NAMES = tuple([f"IMAGE_{i+1}" for i in range(MAX_OUTPUTS)] + ["Stats", "Thoughts"])
 
     FUNCTION = "generate_multiple_responses"
     CATEGORY = "LLM"
@@ -838,7 +979,7 @@ class NanoBananaMultipleOutputsNode:
     def generate_multiple_responses(self, system_prompt, user_message_box, model,
                                    num_outputs, use_same_prompt, prompt_separator,
                                    temperature, timeout, image_generation=False,
-                                   resolution="4K", aspect_ratio="1:1", **kwargs):
+                                   resolution="4K", aspect_ratio="1:1", unique_id=None, **kwargs):
         """
         Generates multiple parallel outputs by making separate API calls.
         Returns 10 image outputs (populated based on num_outputs) and stats.
@@ -852,7 +993,7 @@ class NanoBananaMultipleOutputsNode:
         # Get API key from environment variable
         api_key = os.getenv("VERTEX_AI_API_KEY", "")
         if not api_key:
-            return (*output_images, "Error: VERTEX_AI_API_KEY not found in environment variables.")
+            return (*output_images, "Error: VERTEX_AI_API_KEY not found in environment variables.", "")
 
         # Validate and convert temperature
         validated_temp = self.validate_temperature(temperature, use_same_prompt)
@@ -914,8 +1055,8 @@ class NanoBananaMultipleOutputsNode:
             model_name = "this model"
         
         if len(image_keys) > max_images:
-            return (*output_images, f"Error: Maximum of {max_images} input images allowed for {model_name}.")
-        
+            return (*output_images, f"Error: Maximum of {max_images} input images allowed for {model_name}.", "")
+
         for image_key in image_keys:
             if kwargs[image_key] is not None:
                 try:
@@ -927,52 +1068,112 @@ class NanoBananaMultipleOutputsNode:
                         }
                     })
                 except Exception as e:
-                    return (*output_images, f"Error processing {image_key}: {e}")
+                    return (*output_images, f"Error processing {image_key}: {e}", "")
 
         # Generate multiple outputs in parallel (using threading for async API calls)
         import concurrent.futures
-        
+
+        # Generate workflow_run_id at start so all parallel requests share it
+        workflow_run_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f") if unique_id else None
+
         def make_single_request(prompt_text, index):
             """Helper function to make a single API request"""
             try:
                 return self._single_generate_request(
                     system_prompt, prompt_text, model, validated_temp,
                     timeout, image_generation, resolution, final_aspect_ratio,
-                    image_data, api_key, index
+                    image_data, api_key, index,
+                    unique_id=unique_id,
+                    workflow_run_id=workflow_run_id,
+                    total_requests=num_outputs
                 )
             except Exception as e:
                 print(f"[NanoBanana Multi] Error in request {index + 1}: {e}")
-                return (placeholder_image, f"Error in output {index + 1}: {str(e)}")
+                return (placeholder_image, f"Error in output {index + 1}: {str(e)}", {}, "")
 
         # Execute requests in parallel
         all_stats = []
+        all_metadata = []
+        all_thoughts = []
         print(f"[NanoBanana Multi] Starting {num_outputs} parallel requests...")
-        
+
+        # Track overall wall-clock time for parallel execution
+        batch_start_time = time.time()
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=min(num_outputs, self.MAX_OUTPUTS)) as executor:
             # Submit all requests
             futures = [executor.submit(make_single_request, prompts[i], i) for i in range(num_outputs)]
-            
+
             # Collect results as they complete
             for i, future in enumerate(concurrent.futures.as_completed(futures)):
                 try:
-                    img_tensor, stats = future.result()
+                    img_tensor, stats, metadata, thoughts = future.result()
                     # Find which index this future belongs to
                     idx = futures.index(future)
                     output_images[idx] = img_tensor
                     all_stats.append(f"Output {idx + 1}: {stats}")
+                    if metadata:
+                        all_metadata.append(metadata)
+                    if thoughts:
+                        all_thoughts.append(f"--- Request {idx + 1} ---\n{thoughts}")
                 except Exception as e:
                     print(f"[NanoBanana Multi] Error collecting result: {e}")
 
+        # Calculate overall wall-clock time for the parallel batch
+        batch_end_time = time.time()
+        batch_elapsed_ms = (batch_end_time - batch_start_time) * 1000
+
         # Combine all stats
         combined_stats = " | ".join(all_stats)
-        
-        return (*output_images, combined_stats)
+
+        # Aggregate metadata from all requests
+        # - Processing time: use actual wall-clock time (parallel execution)
+        # - Token counts: SUM (total API usage across all requests)
+        aggregated_metadata = {
+            "processingTimeMs": batch_elapsed_ms,  # Actual wall-clock time for parallel batch
+            "promptTokenCount": sum(m.get("promptTokenCount", 0) for m in all_metadata),
+            "candidatesTokenCount": sum(m.get("candidatesTokenCount", 0) for m in all_metadata),
+            "totalTokenCount": sum(m.get("totalTokenCount", 0) for m in all_metadata),
+            "thoughtsTokenCount": sum(m.get("thoughtsTokenCount", 0) for m in all_metadata),
+            "cachedContentTokenCount": sum(m.get("cachedContentTokenCount", 0) for m in all_metadata),
+            "parallelRequests": num_outputs,  # Number of parallel requests
+        }
+
+        # Send aggregated usage metadata to frontend for display
+        if HAS_SERVER:
+            PromptServer.instance.send_sync("nanobanana.usage_metadata", {
+                "node_id": unique_id,
+                "metadata": aggregated_metadata,
+                "model": model,
+                "node_type": "NanoBananaMultipleOutputsNode"
+            })
+
+        # Log summary for parallel execution
+        if unique_id and workflow_run_id:
+            logger = NodeLogger()
+            logger.log_execution(
+                node_id=str(unique_id),
+                workflow_run_id=workflow_run_id,
+                metadata=aggregated_metadata,
+                model=model,
+                prompt_preview=user_message_box[:200] if user_message_box else None,
+                response_preview=f"Generated {num_outputs} outputs in {batch_elapsed_ms:.0f}ms",
+                total_requests=num_outputs,
+                is_summary=True
+            )
+
+        # Combine all thoughts from parallel requests
+        combined_thoughts = "\n\n".join(all_thoughts) if all_thoughts else ""
+
+        return (*output_images, combined_stats, combined_thoughts)
 
     def _single_generate_request(self, system_prompt, user_text, model, validated_temp,
                                  timeout, image_generation, resolution, aspect_ratio,
-                                 image_data, api_key, request_index):
+                                 image_data, api_key, request_index,
+                                 unique_id=None, workflow_run_id=None, total_requests=None):
         """
         Makes a single API request and returns the image tensor and stats.
+        Logs individual request execution if logging parameters are provided.
         """
         placeholder_image = torch.zeros((1, 1, 1, 3), dtype=torch.float32)
         
@@ -982,7 +1183,7 @@ class NanoBananaMultipleOutputsNode:
         
         if use_simple_endpoint:
             if not os.getenv("VERTEX_AI_ENDPOINT"):
-                return (placeholder_image, "Error: VERTEX_AI_ENDPOINT must be set")
+                return (placeholder_image, "Error: VERTEX_AI_ENDPOINT must be set", {}, "")
             endpoint_base = os.getenv("VERTEX_AI_ENDPOINT")
             url = f"{endpoint_base}/google/{model}:generateContent"
         else:
@@ -1028,12 +1229,12 @@ class NanoBananaMultipleOutputsNode:
                 "temperature": validated_temp
             }
         }
-        
+
         # Add system instruction
         data["systemInstruction"] = {
             "parts": [{"text": system_prompt}]
         }
-        
+
         # Add image generation config
         if image_generation:
             data["generationConfig"]["candidateCount"] = 1
@@ -1063,12 +1264,20 @@ class NanoBananaMultipleOutputsNode:
             candidate = result["candidates"][0]
             content = candidate.get("content", {})
             parts = content.get("parts", [])
-            
+
             image_tensor = placeholder_image
-            
-            # Extract image from parts
+            thoughts_output = ""
+
+            # Extract image and thoughts from parts
+            # Note: "thought" is a boolean flag indicating the part contains reasoning
             for part in parts:
-                if "inlineData" in part:
+                if part.get("thought") == True and "text" in part:
+                    # Model's internal reasoning/thinking (thought=True flag with text content)
+                    thought_text = part["text"]
+                    if isinstance(thought_text, str):
+                        thoughts_output += thought_text
+                        print(f"[NanoBanana Multi] Request {request_index + 1} found thought: {len(thought_text)} chars", flush=True)
+                elif "inlineData" in part:
                     inline_data = part["inlineData"]
                     mime_type = inline_data.get("mimeType", "")
                     if mime_type.startswith("image"):
@@ -1087,12 +1296,49 @@ class NanoBananaMultipleOutputsNode:
             tps = completion_tokens / elapsed_time if elapsed_time > 0 else 0
 
             stats_text = f"TPS: {tps:.2f}, Time: {elapsed_time:.1f}s, Tokens: {prompt_tokens + completion_tokens}"
-            
-            return (image_tensor, stats_text)
+
+            # Return full metadata for aggregation
+            full_metadata = {
+                "processingTimeMs": elapsed_time * 1000,
+                "promptTokenCount": usage_metadata.get("promptTokenCount", 0),
+                "candidatesTokenCount": usage_metadata.get("candidatesTokenCount", 0),
+                "totalTokenCount": usage_metadata.get("totalTokenCount", 0),
+                "thoughtsTokenCount": usage_metadata.get("thoughtsTokenCount", 0),
+                "cachedContentTokenCount": usage_metadata.get("cachedContentTokenCount", 0),
+            }
+
+            # Log individual request execution
+            if unique_id and workflow_run_id:
+                logger = NodeLogger()
+                logger.log_execution(
+                    node_id=str(unique_id),
+                    workflow_run_id=workflow_run_id,
+                    metadata=full_metadata,
+                    model=model,
+                    prompt_preview=user_text[:200] if user_text else None,
+                    response_preview=f"Image generated successfully",
+                    request_index=request_index,
+                    total_requests=total_requests
+                )
+
+            return (image_tensor, stats_text, full_metadata, thoughts_output)
 
         except Exception as e:
             print(f"[NanoBanana Multi] Request {request_index + 1} error: {e}")
-            return (placeholder_image, f"Error: {str(e)[:100]}")
+            # Log error for this request
+            if unique_id and workflow_run_id:
+                logger = NodeLogger()
+                logger.log_execution(
+                    node_id=str(unique_id),
+                    workflow_run_id=workflow_run_id,
+                    metadata={"error": str(e)[:200]},
+                    model=model,
+                    prompt_preview=user_text[:200] if user_text else None,
+                    response_preview=f"Error: {str(e)[:100]}",
+                    request_index=request_index,
+                    total_requests=total_requests
+                )
+            return (placeholder_image, f"Error: {str(e)[:100]}", {}, "")
 
     @classmethod
     def IS_CHANGED(cls, system_prompt, user_message_box, model, num_outputs,
